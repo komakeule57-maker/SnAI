@@ -8,7 +8,7 @@ error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
 ini_set('display_errors', '0');
 ini_set('memory_limit', '128M'); // OOM Safe, da PHP keine Arrays mehr hält!
 
-require_once 'snai_tokenizer.php';
+require_once __DIR__ . '/snai_tokenizer.php';
 
 if ($argc < 3) {
     fwrite(STDERR, "Nutzung: php snai_inference.php <modell.snai> <prompt>\n");
@@ -97,7 +97,7 @@ if ($state_ptr == null) {
 
 // 3. TOKENIZER & PROMPT-ENGINEERING (SFT Korsett)
 // -------------------------------------------------------------------------
-$tokenizer = new SnaiTokenizer('symbio_vocab.json');
+$tokenizer = new SnaiTokenizer(__DIR__ . '/../lib/symbio_vocab.json');
 
 // Wir rahmen den Input des Dashboards strikt ein, damit die Drohne antwortet
 $formatted_prompt = "[USER] " . trim($user_input) . "\n[SYMBIO]";
