@@ -26,20 +26,20 @@ switch ($command) {
         
         echo "[Symbio CLI] Starte BPTT Training...\n";
         // Standard-Parameter: 4 Worker, Max 20 Epochen, Target Loss 7.5
-        $cmd = "php train_cluster.php $input $output 4 20 \"none\" 1 0.0002 7.5";
+        $cmd = "php src/train_cluster.php $input $output 4 20 \"none\" 1 0.0002 7.5";
         passthru($cmd);
         break;
 
     case 'upscale':
         if ($argc < 5) die("Usage: ./symbio.sh cli upscale <in.snai> <out.snai> <target_dim>\n");
-        require_once 'net2net_forge.php';
+        require_once 'src/net2net_forge.php';
         $forge = new Net2NetForge();
         $forge->upscale_model($argv[2], $argv[3], (int)$argv[4]);
         break;
 
     case 'merge':
         if ($argc < 5) die("Usage: ./symbio.sh cli merge <out.snai> <in1.snai> <in2.snai> ...\n");
-        require_once 'net2net_forge.php';
+        require_once 'src/net2net_forge.php';
         
         $output = $argv[2];
         $inputs = array_slice($argv, 3);
