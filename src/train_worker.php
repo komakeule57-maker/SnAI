@@ -6,9 +6,9 @@
 
 // Limit auf 2048M hochgesetzt, da extract_state() am Ende kurzzeitig RAM für das gesamte Modell benötigt
 ini_set('memory_limit', '2048M'); 
-require_once 'snai_tokenizer.php';
-require_once 'tensor_io.php';
-require_once 'tensor_ffi_adapter.php';
+require_once __DIR__ . '/snai_tokenizer.php';
+require_once __DIR__ . '/tensor_io.php';
+require_once __DIR__ . '/tensor_ffi_adapter.php';
 
 // Konstanten für Magic Numbers (Wartbarkeit)
 define('CHUNK_READ_SIZE', 65536);
