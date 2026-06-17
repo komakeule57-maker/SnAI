@@ -10,7 +10,7 @@ if (!function_exists('str_ends_with')) {
     }
 }
 chdir(__DIR__ . '/..');
-require_once 'tensor_io.php';
+require_once __DIR__ . '/tensor_io.php';
 
 define('GOSSIP_PORT', 43720);
 define('TENSOR_PORT', 43721);
