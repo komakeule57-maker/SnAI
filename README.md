@@ -1,5 +1,7 @@
 # Symbiotic Nano-AI
 
+Proof of Concept: Dieses Framework ist der lebende Beweis, dass man nicht auf Python angewiesen ist, um eine schnelle, hardwareagnostische KI-Architektur zu bauen. Es entkoppelt das neuronale Training komplett von gängigen pip-Abhängigkeiten und Virtual Environments.
+
 Ein dezentrales, ressourceneffizientes Framework für das Training, die Synthese und die Inferenz von Large Language Models (LLMs) auf Consumer-Hardware.
 
 Das System kombiniert die Flexibilität von PHP mit der nackten Performance einer C/Nim-Engine via Zero-Copy FFI (Foreign Function Interface). Es ermöglicht verteiltes Lernen (Federated Averaging) über P2P-Netzwerke und dynamisches Modell-Wachstum durch Network Morphism (Net2Net).
