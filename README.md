@@ -72,10 +72,10 @@ Für gezieltes Training, Upscaling oder Tensor-Verschmelzungen.
 Modell trainieren (BPTT):
 Befehl:
 
-./symbio.sh cli train <input_text.txt> <output_modell.snai>
+./symbio.sh cli train <input_text.txt> <output_modell.snai> <ziel_dimensionen>
 
 Beispiel:
-./symbio.sh cli train factory/input/data.txt factory/experts/drone.snai
+./symbio.sh cli train factory/input/data.txt factory/experts/drone.snai 512
 
 
 Modelle verschmelzen (Federated Merge):
