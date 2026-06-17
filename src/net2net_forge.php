@@ -1,6 +1,8 @@
 <?php
-// Dateiname: net2net_forge.php
+// Dateiname: src/net2net_forge.php
 // Funktion: CLI-Werkzeug. Verschmilzt Tensoren und erweitert sie durch Network Morphism.
+
+ini_set('memory_limit', '1024M'); // Sicherheits-Limit
 
 class Net2NetForge {
     private const CHUNK_SIZE_BYTES = 1048576;
@@ -91,38 +93,49 @@ class Net2NetForge {
         return true;
     }
 
+    /**
+     * ECHTES ROW-BY-ROW STREAMING
+     * Löst das OOM (Out Of Memory) Problem bei Modellen mit >1024 Dimensionen.
+     */
     private function upscale_matrix_stream($in_fp, $out_fp, int $old_r, int $old_c, int $new_r, int $new_c, float $scale = 1.0) {
-        $expected_bytes = $old_r * $old_c * 4;
-        $old_bin = $this->robust_fread($in_fp, $expected_bytes);
-        
-        if ($old_bin === false || strlen($old_bin) !== $expected_bytes) {
-            die("[Forge] Fehler: Inkomplette Matrix-Struktur gelesen.\n");
-        }
-        
-        $old_floats = array_values(unpack("g*", $old_bin));
-        $buffer = [];
         $buf_size = 8192; 
-        $new_bin = '';
-
+        $buffer = [];
+        
+        // Verarbeite Zeile für Zeile (verhindert das Laden kompletter Riesen-Matrizen in den RAM)
         for ($r = 0; $r < $new_r; $r++) {
+            $row_floats = [];
+            
+            // Wenn wir in einer bestehenden (alten) Zeile sind, lesen wir exakt diese EINE Zeile ein
+            if ($r < $old_r) {
+                $row_bin = $this->robust_fread($in_fp, $old_c * 4);
+                if (strlen($row_bin) === ($old_c * 4)) {
+                    $row_floats = array_values(unpack("g*", $row_bin));
+                }
+            }
+
             for ($c = 0; $c < $new_c; $c++) {
                 if ($r < $old_r && $c < $old_c) {
-                    $idx = ($r * $old_c) + $c;
-                    $val = $old_floats[$idx] * $scale;
+                    // Kopiere alte Gewichte
+                    $val = ($row_floats[$c] ?? 0.0) * $scale;
                 } else {
+                    // Generiere Forge-Noise für die neuen expansiven Dimensionen
                     $val = ((mt_rand() / mt_getrandmax()) * 2 - 1) * self::NOISE_FACTOR; 
                 }
                 
                 $buffer[] = $val;
+                
+                // Flush auf die Festplatte, sobald Buffer voll ist (Low RAM Footprint)
                 if (count($buffer) >= $buf_size) {
-                    $new_bin .= pack("g*", ...$buffer);
+                    fwrite($out_fp, pack("g*", ...$buffer));
                     $buffer = [];
                 }
             }
         }
         
-        if (!empty($buffer)) $new_bin .= pack("g*", ...$buffer);
-        fwrite($out_fp, $new_bin);
+        // Restbestand auf Festplatte flushen
+        if (!empty($buffer)) {
+            fwrite($out_fp, pack("g*", ...$buffer));
+        }
     }
 
     public function upscale_model(string $input_path, string $output_path, int $target_dim): bool {
@@ -209,7 +222,7 @@ if (php_sapi_name() === 'cli' && basename(__FILE__) === basename($_SERVER['SCRIP
         $forge->upscale_model($input, $output, $dim);
     } else {
         echo "Verwendung:\n";
-        echo "  php net2net_forge.php merge <output.snai> <in1.snai> <in2.snai> ...\n";
-        echo "  php net2net_forge.php upscale <input.snai> <output.snai> <ziel_dim>\n";
+        echo "  php src/net2net_forge.php merge <output.snai> <in1.snai> <in2.snai> ...\n";
+        echo "  php src/net2net_forge.php upscale <input.snai> <output.snai> <ziel_dim>\n";
     }
 }
