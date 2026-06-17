@@ -34,7 +34,7 @@ case $COMMAND in
         php src/snai_cli.php "${@:2}"
         ;;
     "swarm")
-        echo -e "\e[35m[Symbio] Zünde Myzelium & Orchestrator (Schwarm-Modus)...\e[0m"
+        echo -e "\e[35m[Symbio] Starte Netzwerk & Orchestrator (Schwarm-Modus)...\e[0m"
         
         # Starte den Transport-Layer im Hintergrund
         php src/snai_gossip_node.php &
