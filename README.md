@@ -1,4 +1,4 @@
-# Symbio Nano-AI
+# Symbiotic Nano-AI
 
 Ein dezentrales, ressourceneffizientes Framework für das Training, die Synthese und die Inferenz von Large Language Models (LLMs) auf Consumer-Hardware.
 
