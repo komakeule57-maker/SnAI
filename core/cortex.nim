@@ -2,10 +2,9 @@
 # Dateiname: cortex.nim
 # Funktion: Symbio Nano-AI Framework - Cortex Core Backend (FFI, Inference, BPTT)
 # ==============================================================================
-# SYMBIO NANO-AI FRAMEWORK (Code-4372)
+# SYMBIO NANO-AI FRAMEWORK
 # Modul: Cortex Core (Nim FFI Backend) - PRODUCTION V9.9 (LOBOTOMIE-FIX)
-# ------------------------------------------------------------------------------
-# MAXIME: E > H. Der absolute VRAM Sweetspot.
+# -----------------------------------------------------------------------------
 # FIX: Multi-Head Attention Indexing Bug gefixt! Die Heads haben sich vorher 
 #      gegenseitig überschrieben / falsch aus dem Value-Cache gelesen. Das 
 #      Netzwerk war effektiv "blind".
