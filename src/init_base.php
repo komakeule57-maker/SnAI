@@ -4,7 +4,7 @@
  * Modul: Base Model Initializer
  */
 chdir(__DIR__ . '/..');
-require_once 'snai_tokenizer.php';
+require_once __DIR__ . '/snai_tokenizer.php';
 
 if ($argc < 2) {
     die("Nutzung: php init_base.php <output.snai> [vocab_size=8192] [hidden_dim=128] [ctx_size=512] [num_layers=2]\n");
@@ -13,7 +13,7 @@ if ($argc < 2) {
 $output_file = $argv[1];
 // 2. Dynamisches Vocab-Limit: Falls kein Argument übergeben wurde, Tokenizer fragen
 if (!isset($argv[2]) || $argv[2] == 0) {
-    $tokenizer = new SnaiTokenizer('symbio_vocab.json');
+    $tokenizer = new SnaiTokenizer(__DIR__ . '/../lib/symbio_vocab.json');
     $vocab_size = $tokenizer->getVocabSize(); // Holt z.B. 16384 aus der JSON
     echo "> Automatische Vocab-Größe erkannt: $vocab_size\n";
 } else {
