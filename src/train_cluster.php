@@ -13,7 +13,7 @@ require_once __DIR__ . '/tensor_ffi_adapter.php';
 require_once __DIR__ . '/snai_tokenizer.php'; 
 
 if ($argc < 6) {
-    echo "Nutzung: php src/train_cluster.php <input.txt> <output.snai> <num_workers> <max_epochs> <base_model> [datatype] [custom_lr] [target_loss]\n";
+    echo "Nutzung: php src/train_cluster.php <input.txt> <output.snai> <num_workers> <max_epochs> <base_model> [datatype] [custom_lr] [target_loss] [target_dim]\n";
     exit(1);
 }
 
@@ -38,6 +38,7 @@ if ($base_model !== 'none' && strpos($base_model, '/') !== 0 && strpos($base_mod
 $target_dtype = isset($argv[6]) ? (int)$argv[6] : 1; 
 $custom_lr    = isset($argv[7]) ? $argv[7] : "0.0005"; 
 $target_loss  = isset($argv[8]) ? (float)$argv[8] : 0.0;
+$target_dim   = isset($argv[9]) ? (int)$argv[9] : 128; // <--- NEUER PARAMETER
 
 if ($num_workers <= 0 || $max_epochs <= 0) {
     echo "[Fatal] num_workers und max_epochs müssen > 0 sein.\n";
@@ -62,18 +63,20 @@ if ($base_model === 'none') {
         echo "[Forge] Ziel-Modell existiert bereits. Nutze es als Basis (Fine-Tuning)...\n";
         $base_model = $output_model;
     } else {
-        // FIX: Nutzt jetzt absolut verankerten lib-Ordner
+        // FIX: Nutzt absolut verankerten lib-Ordner
         $tokenizer = new SnaiTokenizer(__DIR__ . '/../lib/symbio_vocab.json');
         $dynamic_vocab_size = $tokenizer->getVocabSize();
         
-        echo "[Forge] Kein Basismodell gefunden. Erschaffe Multi-Layer Genesis-Matrix (Vocab: $dynamic_vocab_size)...\n";
+        echo "[Forge] Kein Basismodell gefunden. Erschaffe Multi-Layer Genesis-Matrix (Vocab: $dynamic_vocab_size, Dim: $target_dim)...\n";
         $base_model = $checkpoint_dir . "genesis_{$session_id}.snai";
         
+        // Dynamische Dimension beim Gießen der Matrix anwenden!
         $init_cmd = sprintf(
-            "php %s %s %d 128 512 2 2>&1",
+            "php %s %s %d %d 512 2 2>&1",
             escapeshellarg(__DIR__ . '/init_base.php'),
             escapeshellarg($base_model),
-            $dynamic_vocab_size
+            $dynamic_vocab_size,
+            $target_dim
         );
         $init_output = shell_exec($init_cmd);
         echo $init_output;
