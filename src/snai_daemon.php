@@ -1,8 +1,7 @@
 <?php
 /** Dateiname: src/snai_daemon.php
   * Funktion: Standalone Swarm Orchestrator. Überwacht Ordner und triggert automatische KI-Synthesen.
-  * SYMBIO NANO-AI FRAMEWORK
-  * Modul: Base Model Initializer
+  *
   * This file is part of SnAI.
   *
   * SnAI is free software: you can redistribute it and/or modify
