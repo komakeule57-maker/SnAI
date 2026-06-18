@@ -1,7 +1,16 @@
 <?php
-// Dateiname: tensor_io.php
-// Funktion: Behandelt das Laden (Header) und Speichern (Stream) von Tensormodellen.
-
+/** Dateiname: tensor_io.php
+  * Funktion: Behandelt das Laden (Header) und Speichern (Stream) von Tensormodellen.
+  *
+  * SYMBIO NANO-AI FRAMEWORK
+  * Modul: Base Model Initializer
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 
 define('SNAI_MAGIC', 'SNAI_V4');
 define('SNAI_HEADER_SIZE', 28); // 8 Bytes Magic + 20 Bytes Parameter
