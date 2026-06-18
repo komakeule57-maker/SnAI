@@ -2,7 +2,14 @@
 /**
  * SYMBIO NANO-AI FRAMEWORK
  * Modul: Base Model Initializer
- */
+ * This file is part of SnAI.
+ *
+ * SnAI is free software: you can redistribute it and/or modify
+ * it under the terms of the GNU Affero General Public License as published
+ * by the Free Software Foundation, either version 3 of the License, or
+ * (at your option) any later version.
+*/
+
 chdir(__DIR__ . '/..');
 require_once __DIR__ . '/snai_tokenizer.php';
 
