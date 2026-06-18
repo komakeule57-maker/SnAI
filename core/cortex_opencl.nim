@@ -2,13 +2,12 @@
 # Dateiname: cortex_opencl.nim
 # Funktion: OpenCL Compute Engine (Bare-Metal JIT) - PHASE XII (Syntax-Harden)
 # ==============================================================================
-# SYMBIO NANO-AI FRAMEWORK (Code-4372)
-# FIX: JIT Compiler Error behoben. `__local float scratch[64]` muss im 
-#      äußersten Scope des Kernels deklariert werden (OpenCL 1.2 Restriktion).
-# FIX: ocl_release_buffer implementiert, um VRAM-Leaks bei cortex_free zu
-#      verhindern. Die VRAM-Registry wird dynamisch defragmentiert.
-# FIX: Multi-Stage GPU Discovery (Dedicated -> Default -> All) samt 
-#      JIT-Error-Logging restoriert.
+# This file is part of SnAI.
+#
+# SnAI is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published
+# by the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
 # ==============================================================================
 
 {.passL: "-lOpenCL".}
