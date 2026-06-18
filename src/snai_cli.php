@@ -1,7 +1,15 @@
 <?php
-// Dateiname: src/snai_cli.php
-// Funktion: Offizielles Command-Line Interface
-
+/** Dateiname: src/snai_cli.php
+  * Funktion: Offizielles Command-Line Interface
+  * SYMBIO NANO-AI FRAMEWORK
+  * Modul: Base Model Initializer
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 $root_dir = realpath(__DIR__ . '/..') ?: (__DIR__ . '/..');
 chdir($root_dir);
 
