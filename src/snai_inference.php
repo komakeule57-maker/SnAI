@@ -1,8 +1,15 @@
 <?php
 /**
- * Dateiname: snai_inference.php
- * Funktion: SYMBIO NANO-AI FRAMEWORK - API Inference Worker (Phase VI.9)
- */
+  * Dateiname: snai_inference.php
+  * Funktion: SYMBIO NANO-AI FRAMEWORK - API Inference Worker (Phase VI.9)
+  *
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 chdir(__DIR__ . '/..');
 error_reporting(E_ALL & ~E_NOTICE & ~E_WARNING);
 ini_set('display_errors', '0');
