@@ -1,8 +1,16 @@
 <?php
 /**
- * Datei: train_worker.php
- * Funktion: Lokaler CLI-Worker für das Training der SNAI-Modelle. 
+  * Datei: train_worker.php
+  * Funktion: Lokaler CLI-Worker für das Training der SNAI-Modelle. 
+  *
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
 */
+
 
 // Limit auf 2048M hochgesetzt, da extract_state() am Ende kurzzeitig RAM für das gesamte Modell benötigt
 ini_set('memory_limit', '2048M'); 
