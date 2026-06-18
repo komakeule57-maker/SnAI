@@ -59,7 +59,7 @@ Startet den P2P-Gossip-Node und den Autonomie-Daemon.
 
 Ablauf:
 
-Lege rohe Textdateien (Nektar) im Format [SYMBIO]\n...Text...\n</s> im Ordner factory/input/ ab.
+Lege rohe Textdateien im Format [SYMBIO]\n...Text...\n</s> im Ordner factory/input/ ab.
 
 Der Daemon erkennt die Daten, trainiert eine Basis-Drohne (128-Dim) und legt sie in factory/experts/ ab.
 
