@@ -111,7 +111,7 @@ Beispiel:
 
 /factory/input - Rohe Textdaten (.txt) für das Training.
 
-/factory/archive - Verdaute Textdaten (werden für Kalibrierungen wiederverwendet).
+/factory/archive - Fertig trainierte Textdaten (werden für Kalibrierungen wiederverwendet).
 
 /factory/experts - Generierte Basis-Drohnen (128-Dim).
 
