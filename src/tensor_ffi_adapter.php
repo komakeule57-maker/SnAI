@@ -1,6 +1,16 @@
 <?php
-// Dateiname: tensor_ffi_adapter.php
-// Funktion: FFI Adapter & Cortex Bridge zur Nim-Engine
+/** Dateiname: tensor_ffi_adapter.php
+  * Funktion: FFI Adapter & Cortex Bridge zur Nim-Engine
+  *
+  * SYMBIO NANO-AI FRAMEWORK
+  * Modul: Base Model Initializer
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 
 class SnaiCortexBridge {
     public $ffi;
