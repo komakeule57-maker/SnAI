@@ -1,7 +1,15 @@
 <?php
-// Dateiname: src/net2net_forge.php
-// Funktion: CLI-Werkzeug. Verschmilzt Tensoren und erweitert sie durch Network Morphism.
-
+/** Dateiname: src/net2net_forge.php
+  *Funktion: CLI-Werkzeug. Verschmilzt Tensoren und erweitert sie durch Network Morphism.
+  * SYMBIO NANO-AI FRAMEWORK
+  * Modul: Base Model Initializer
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 ini_set('memory_limit', '1024M'); // Sicherheits-Limit
 
 class Net2NetForge {
