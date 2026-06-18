@@ -1,6 +1,14 @@
 <?php
-// Dateiname: src/train_cluster.php
-// Funktion: Steuert das verteilte Training (BPE-Worker), verwaltet Epochen und verschmilzt Tensoren.
+/** Dateiname: src/train_cluster.php
+  * Funktion: Steuert das verteilte Training (BPE-Worker), verwaltet Epochen und verschmilzt Tensoren.
+  *
+  * This file is part of SnAI.
+  *
+  * SnAI is free software: you can redistribute it and/or modify
+  * it under the terms of the GNU Affero General Public License as published
+  * by the Free Software Foundation, either version 3 of the License, or
+  * (at your option) any later version.
+*/
 
 ini_set('memory_limit', '1024M');
 
