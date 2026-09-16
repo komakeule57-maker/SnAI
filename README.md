@@ -1,3 +1,5 @@
+***Deutsch** · [English](README.en.md)*
+
 # Symbiotic Nano-AI
 
 Proof of Concept: Dieses Framework ist der lebende Beweis, dass man nicht auf Python angewiesen ist, um eine schnelle, hardwareagnostische KI-Architektur zu bauen. Es entkoppelt das neuronale Training komplett von gängigen pip-Abhängigkeiten und Virtual Environments.
