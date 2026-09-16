@@ -142,7 +142,7 @@ Ein Checkpoint ist ein roher Strom, kein Container:
 | `core/` | Quelltext der Nim/C/CUDA-Tensor-Engine |
 | `src/` | PHP-Steuerlogik (Daemon, Node, Cluster-Master, Destille, CLI) |
 | `lib/` | Tokenizer-Vokabular; hierhin baut `symbio.sh init` die `.so`-Dateien |
-| `tools/` | Tokenizer-Schmiede (`bpe_forge`) zur einmaligen Vokabular-Erzeugung |
+| `tools/` | Tokenizer-Schmiede (`bpe_forge.nim`, nur Nim-Standardbibliothek) zur einmaligen Vokabular-Erzeugung |
 | `factory/` | Laufzeit-Territorium, wird beim `init` angelegt |
 
 Innerhalb von `factory/`:

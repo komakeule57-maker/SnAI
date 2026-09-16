@@ -25,7 +25,7 @@ class SnaiTokenizer {
 
     public function __construct(string $vocab_file = __DIR__ . '/../lib/symbio_vocab.json') {
         if (!file_exists($vocab_file)) {
-            die("🚨 FATAL: Tokenizer-Datei '$vocab_file' fehlt. Führe erst bpe_gen.py aus.\n");
+            die("🚨 FATAL: Tokenizer-Datei '$vocab_file' fehlt. Erzeuge sie mit tools/bpe_init/bpe_forge.\n");
         }
 
         $data = json_decode(file_get_contents($vocab_file), true);
