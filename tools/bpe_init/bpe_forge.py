@@ -14,8 +14,8 @@ from tokenizers.normalizers import Sequence as NormSequence, NFKC, Replace
 import glob
 
 # 1. Konfiguration
-VOCAB_SIZE = 16384
-#VOCAB_SIZE = 8192
+#VOCAB_SIZE = 16384
+VOCAB_SIZE = 8192
 OUTPUT_FILE = "symbio_vocab.json"
 
 # Sichere UTF-8 Repräsentation des LLaMA/Gemma Metaspaces

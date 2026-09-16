@@ -30,6 +30,8 @@ Nim Compiler: Version 1.6+ (zur Kompilierung der JIT-Engine).
 
 OpenCL (Optional): Für GPU-beschleunigte Inferenz und Training.
 
+CUDA (Optional): Wird genutzt, wenn nvcc beim Bauen gefunden wird; sonst überspringt ./symbio.sh init das CUDA-Backend und OpenCL/CPU tragen allein.
+
 # 📦 Installation
 
 Repository klonen:
@@ -67,36 +69,41 @@ Sobald 3 Drohnen existieren, verschmilzt der Daemon diese automatisch, skaliert 
 
 Modus 2: Manuelle Kontrolle (CLI)
 
-Für gezieltes Training, Upscaling oder Tensor-Verschmelzungen.
+Für gezieltes Training, Inferenz oder Destillation.
 
 Modell trainieren (BPTT):
 Befehl:
 
-./symbio.sh cli train <input_text.txt> <output_modell.snai> <ziel_dimensionen>
+./symbio.sh cli train <input_text.txt> <output_modell.snai> [epochen]
 
 Beispiel:
-./symbio.sh cli train factory/input/data.txt factory/experts/drone.snai 512
+./symbio.sh cli train factory/input/data.txt factory/experts/drone.snai 20
 
+Hinweis: Die Genesis-Dimension liegt fest bei 128 (Drohne); ein Dimensions-Argument gibt es nicht mehr. Höhere Stufen entstehen durch Destillation, nicht durch direktes Training.
 
-Modelle verschmelzen (Federated Merge):
+Modell befragen (Zero-Copy Inferenz):
 
 Befehl:
 
-./symbio.sh cli merge <output.snai> <input1.snai> <input2.snai> ...
+./symbio.sh cli infer <modell.snai> "<prompt>" [beam_width]
 
 Beispiel:
 
-./symbio.sh cli merge factory/checkpoints/merged.snai factory/experts/d1.snai factory/experts/d2.snai
+./symbio.sh cli infer factory/experts/drone.snai "Die Bahnstrecke"
 
-Modell skalieren (Net2Net Upscale):
+Ohne beam_width läuft Temperature/min-p-Sampling; ab 2 schaltet Beam-Search ein.
+
+Modell destillieren (Federated Merge + Net2Net Upscale + Kalibrierung):
 
 Befehl:
 
-./symbio.sh cli upscale <input.snai> <output.snai> <ziel_dimension>
+./symbio.sh cli distill [Prinzessin|Matriarchin|Empress|Demi Goddess|Goddess]
 
 Beispiel:
 
-./symbio.sh cli upscale factory/checkpoints/merged.snai factory/royal/princess.cortex 256
+./symbio.sh cli distill Prinzessin
+
+Die früheren Einzelschritte cli merge und cli upscale gibt es nicht mehr. Verschmelzung, Expansion und die anschliessende Kalibrierung laufen als eine Einheit; die Zielarchitektur je Stufe steht in der EVOLUTION_LADDER in src/royal_distillery.php (Prinzessin 256 Dim / 3 Layer, Matriarchin 512 / 6, Empress 1024 / 12, ...). Für Prinzessin müssen 3 Drohnen in factory/tributes/ liegen - im autonomen Betrieb stellt der Daemon sie selbst dorthin.
 
 
 # 📂 Architektur / Verzeichnisstruktur

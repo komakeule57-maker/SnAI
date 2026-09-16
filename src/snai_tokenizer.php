@@ -1,15 +1,18 @@
 <?php
-/** Dateiname: snai_tokenizer.php
-  * Funktion: BPE Tokenizer Engine. Wandelt Text in Token-IDs um und umgekehrt. Nutzt Metaspaces für exakte Leerzeichen-Rekonstruktion.
-  * 
-  * Modul: Base Model Initializer
-  * This file is part of SnAI.
-  *
-  * SnAI is free software: you can redistribute it and/or modify
-  * it under the terms of the GNU Affero General Public License as published
-  * by the Free Software Foundation, either version 3 of the License, or
-  * (at your option) any later version.
-*/
+// Dateiname: src/snai_tokenizer.php
+// Funktion: BPE Tokenizer Engine. Wandelt Text in Token-IDs um und umgekehrt. Nutzt Metaspaces für exakte Leerzeichen-Rekonstruktion.
+
+/**
+ * SYMBIO NANO-AI FRAMEWORK (Code-4372)
+ * Modul: BPE Tokenizer (Phase V.2 - Data Integrity Patch)
+ * -------------------------------------------------------------------------
+ * MAXIME: Kompromisslose Präzision & Dynamische Skalierbarkeit. 
+ * FIX: Trim-Bug in der decode() Funktion behoben. 
+ * FIX: SFT-Korsett Isolation. Special-Tokens werden vor dem BPE-Split extrahiert.
+ * AUDIT-FIX (V9.6): UTF-8 Aegis Patch gegen Zerschnittene Bytes.
+ * AUDIT-FIX (V10): Stiller Text-Verlust! Regex um String-Anfang (`^`) erweitert, 
+ * damit Wörter nach Special-Tokens (wie \n) nicht mehr aus dem Vokabular gelöscht werden.
+ */
 
 class SnaiTokenizer {
     private $vocab = [];
@@ -17,15 +20,20 @@ class SnaiTokenizer {
     private $bpe_ranks = [];
     private $cache = []; 
     
-    // Hex-Repräsentation von U+2581 für absolute Sicherheit in PHP
+    // Wir nutzen die Hex-Repräsentation von U+2581 für absolute Sicherheit in PHP
     private const META_SPACE = "\xE2\x96\x81"; 
 
-    public function __construct(string $vocab_file = 'lib/symbio_vocab.json') {
+    public function __construct(string $vocab_file = __DIR__ . '/../lib/symbio_vocab.json') {
         if (!file_exists($vocab_file)) {
-            die("FATAL: Tokenizer-Datei '$vocab_file' fehlt. Führe erst 'tools/bpe_init/bpe_gen.py' aus oder lade das Release-Paket herunter.\n");
+            die("🚨 FATAL: Tokenizer-Datei '$vocab_file' fehlt. Führe erst bpe_gen.py aus.\n");
         }
 
         $data = json_decode(file_get_contents($vocab_file), true);
+        
+        // AUDIT-FIX: Struktur-Validierung
+        if (!isset($data['model']['vocab']) || !is_array($data['model']['vocab'])) {
+            die("🚨 FATAL: '$vocab_file' ist korrupt. 'model.vocab' fehlt oder ist ungültig.\n");
+        }
         
         $this->vocab = $data['model']['vocab'];
         $this->inverse_vocab = array_flip($this->vocab);
@@ -57,7 +65,7 @@ class SnaiTokenizer {
         if (isset($this->cache[$token])) return $this->cache[$token];
 
         $word = preg_split('//u', $token, -1, PREG_SPLIT_NO_EMPTY);
-        if ($word === false) return $token; // Fallback bei PCRE-Limits
+        if ($word === false) return $token; 
 
         $pairs = $this->get_pairs($word);
 
@@ -118,8 +126,6 @@ class SnaiTokenizer {
     public function encode(string $text): array {
         $bpe_tokens = [];
         
-        // Eliminiert zerschnittene UTF-8 Bytes (z.B. halbe Emojis), die beim 
-        // byte-basierten Chunking der Textdateien entstehen und die PCRE-Engine crashen lassen.
         $text = mb_convert_encoding($text, 'UTF-8', 'UTF-8');
         
         if (class_exists('Normalizer')) {
@@ -143,10 +149,8 @@ class SnaiTokenizer {
             $escaped_specials = array_map(function($st) { return preg_quote($st, '/'); }, array_keys($special_map));
             $regex = '/(' . implode('|', $escaped_specials) . ')/u';
             
-            // @ unterdrückt PCRE-Warnings.
             $parts = @preg_split($regex, $text, -1, PREG_SPLIT_DELIM_CAPTURE | PREG_SPLIT_NO_EMPTY);
             
-            // Fallback, falls die Regex-Engine trotzdem versagt (z.B. Memory/Backtrack Limits)
             if ($parts === false) {
                 $parts = [$text];
             }
@@ -164,9 +168,11 @@ class SnaiTokenizer {
 
             $work_text = str_replace(' ', self::META_SPACE, $part);
 
-            $matched = @preg_match_all('/(' . self::META_SPACE . '|\n)[^' . self::META_SPACE . '\n]*/u', $work_text, $matches);
+            // AUDIT-FIX: Erweitertes Pattern, das auch String-Anfänge ohne Meta-Space matchen kann!
+            // Verhindert das spurlos Verschwinden von Wörtern direkt nach einem Newline/Special-Token.
+            $pattern = '/(?:' . self::META_SPACE . '|\n)[^' . self::META_SPACE . '\n]*|^[^' . self::META_SPACE . '\n]*/u';
+            $matched = @preg_match_all($pattern, $work_text, $matches);
             
-            // Abfangen von Engine-Crashes. Verhindert "false given in foreach"
             if ($matched === false || empty($matches[0])) {
                 continue;
             }
@@ -201,12 +207,13 @@ class SnaiTokenizer {
 
 // === QUICK TEST ===
 if (basename(__FILE__) === basename($_SERVER['SCRIPT_FILENAME'])) {
-    if (file_exists('symbio_vocab.json')) {
-        $tok = new SnaiTokenizer('symbio_vocab.json');
+    if (file_exists(__DIR__ . '/../lib/symbio_vocab.json')) {
+        $tok = new SnaiTokenizer();
         
         echo "\n[System] Tokenizer geladen. Dynamische Vocab-Size: " . $tok->getVocabSize() . "\n";
         
-        $test_string = "[USER] Definiere eine Python Funktion:\n[SYMBIO] def hallo():\n    print('Test')</s>";
+        // Erweiterter Test-String ohne führendes Leerzeichen am Zeilenanfang
+        $test_string = "[USER] Definiere eine Python Funktion:\n[SYMBIO] def hallo():\nprint('Test')</s>";
         echo "\n[Test String]:\n$test_string\n\n";
         
         $start = microtime(true);

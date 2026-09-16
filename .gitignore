@@ -1,0 +1,9 @@
+# Laufzeit-Territorium. Wird von ./symbio.sh init angelegt und im Betrieb
+# gefuellt; gehoert nicht in die Auslieferung.
+factory/
+
+# Gebaute Artefakte. Entstehen aus core/ per ./symbio.sh init.
+lib/*.so
+
+# Lockfile des Daemons (src/snai_daemon.php).
+src/daemon.lock
