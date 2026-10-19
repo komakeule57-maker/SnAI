@@ -207,10 +207,14 @@ if ($base_model === 'none') {
         $base_model = $checkpoint_dir . "genesis_{$session_id}.snai";
         $init_dim = 128;
         $init_cmd = sprintf("php " . escapeshellarg(__DIR__ . '/init_base.php') . " %s %d %d 512 2 2>&1", escapeshellarg($base_model), $dynamic_vocab_size, $init_dim);
-        $init_output = shell_exec($init_cmd);
-        echo $init_output;
-        if (!file_exists($base_model)) {
-            echo "🚨 [Fatal] Genesis-Modell konnte nicht erstellt werden!\n";
+        // 2026-10-19: exec statt shell_exec, damit der Exitcode ankommt -
+        // file_exists() allein hielt eine abgebrochene Genesis fuer gelungen.
+        $init_lines = [];
+        $init_rc = 0;
+        exec($init_cmd, $init_lines, $init_rc);
+        echo implode("\n", $init_lines), "\n";
+        if ($init_rc !== 0 || !file_exists($base_model)) {
+            echo "🚨 [Fatal] Genesis-Modell konnte nicht erstellt werden (init_base.php rc=$init_rc)!\n";
             exit(1);
         }
 
@@ -471,8 +475,11 @@ for ($epoch = $start_epoch; $epoch <= $max_epochs; $epoch++) {
         // $base_model. Vergleich muss gegen den tatsaechlichen Startpunkt laufen.
         $start_model = ($epoch === $start_epoch) ? $base_model : $checkpoint_state;
         
+        // 2026-10-19: Lernraten als %.17g statt %F (exakter Rundlauf). %F schreibt sechs
+        // Nachkommastellen: eine Lernrate unter 5e-7 kam als 0.000000 an, und
+        // der Worker ersetzte sie still durch seine Vorgabe 0,0005.
         $cmd = sprintf(
-            "php " . escapeshellarg(__DIR__ . '/train_worker.php') . " %s %s 1 %s %d %F %d %F %F %F %F 2>&1",
+            "php " . escapeshellarg(__DIR__ . '/train_worker.php') . " %s %s 1 %s %d %.17g %d %.17g %F %F %F 2>&1",
             escapeshellarg($chunk_files[$i]),
             escapeshellarg($worker_out),
             escapeshellarg($start_model),
@@ -916,10 +923,11 @@ for ($epoch = $start_epoch; $epoch <= $max_epochs; $epoch++) {
         break; 
     }
 
-    if ($epoch > 1 && $current_epoch_loss < 2.5 && $target_loss == 0.0) {
-        echo "[Killswitch] Entropie-Minimum für BPE erreicht. Beende vorzeitig.\n";
-        break; 
-    }
+    // 2026-10-19: Der feste Killswitch (Abbruch ab Epoche 2 bei Loss < 2,5,
+    // sobald KEIN target_loss gesetzt war) ist entfernt. Er griff genau dann,
+    // wenn der Aufrufer ausdruecklich alle Epochen wollte, und ein Loss von 2,5
+    // ist bei 8192 Token kein Entropie-Minimum. Fruehes Anhalten bleibt ueber
+    // target_loss (argv 8) moeglich.
 }
 
 // 4. CLEANUP & LOGGING

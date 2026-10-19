@@ -10,8 +10,14 @@
  */
 require_once 'snai_tokenizer.php';
 
+// 2026-10-19: Abbruch mit Exitcode 1 statt die() (die() endet mit 0).
+function genesis_abbruch(string $meldung): never {
+    echo $meldung;
+    exit(1);
+}
+
 if ($argc < 2) {
-    die("Nutzung: php init_base.php <output.snai> [vocab_size=8192] [hidden_dim=128] [ctx_size=512] [num_layers=2] [ffn_dim=auto]\n");
+    genesis_abbruch("Nutzung: php init_base.php <output.snai> [vocab_size=8192] [hidden_dim=128] [ctx_size=512] [num_layers=2] [ffn_dim=auto]\n");
 }
 
 $output_file = $argv[1];
@@ -87,7 +93,7 @@ if (!is_dir($dir) && $dir !== '.') {
 
 $fp = fopen($output_file, 'wb');
 if (!$fp) {
-    die("❌ [Fehler] Konnte Datei nicht öffnen: $output_file\n");
+    genesis_abbruch("❌ [Fehler] Konnte Datei nicht öffnen: $output_file\n");
 }
 
 echo "> Schreibe V5-Header...\n";

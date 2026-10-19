@@ -76,6 +76,9 @@ function korpus_sanitize_tabelle(): array
         // Bekanntes Korpusartefakt aus dem Truncation-Bug (gefixt 15.08.,
         // kann ueber ungepatchte Sammler weiterhin hereinkommen).
         '... [Gekürzt]'=>'',
+        // bpe_forge fasst Tabs zu Leerzeichen zusammen; stuenden sie im Korpus,
+        // saehe das Training etwas anderes als der Vokabularbau.
+        "\t"=>' ',
     ];
 
     $karte = [];
@@ -104,5 +107,60 @@ function korpus_sanitize_bereit(): bool
  */
 function korpus_bereinigen(string $text): string
 {
-    return strtr($text, korpus_sanitize_tabelle());
+    return korpus_fremdschrift_streichen(strtr($text, korpus_sanitize_tabelle()));
+}
+
+/**
+ * Streicht Laeufe aus Schriften, die sich nicht transliterieren lassen (CJK,
+ * Arabisch, Hebraeisch, Devanagari ...). Im Korpus stehen sie fast immer als
+ * Originalschreibung in Klammern hinter einem Namen (56 % gegen 5 % Grundrate,
+ * gemessen 2026-09-28); der Tokenizer machte daraus <unk>-Ketten, die das
+ * Modell als Figur "Name (<unk><unk>)" gelernt hat. Aufgeraeumt wird nur rund
+ * um die gestrichene Stelle, der uebrige Text bleibt bytegleich.
+ */
+function korpus_fremdschrift_streichen(string $text): string
+{
+    if (!mb_check_encoding($text, 'UTF-8')) {
+        // /u scheitert an EINER kaputten Sequenz fuer den ganzen Text - dann
+        // zeilenweise, damit nicht eine Zeile die ganze Datei vom Streichen ausnimmt.
+        $zeilen = explode("\n", $text);
+        foreach ($zeilen as &$z) {
+            if (mb_check_encoding($z, 'UTF-8')) $z = korpus_fremdschrift_streichen($z);
+        }
+        return implode("\n", $zeilen);
+    }
+
+    $F = '[^\p{Latin}\p{Greek}\p{Cyrillic}\p{Common}\p{Inherited}]';
+    // Verbinder innerhalb eines Laufs: Leerzeichen, Ziffern, CJK-Satzzeichen,
+    // Mittelpunkt, kombinierende Zeichen ("小熊 秀雄", "철산1동" sind je EIN Lauf).
+    $J = '[ \p{N}\x{3000}-\x{303F}\x{30FB}\x{30FC}\x{FF01}-\x{FF65}\x{00B7}\p{Inherited}]';
+    $S = "\u{FDD0}";   // Nichtzeichen, kommt in gueltigem Text nicht vor
+
+    // Nachgestellte vollbreite CJK-Satzzeichen und Dehnungsstrich ("造反：",
+    // "フライデー") gehoeren mit zum Lauf.
+    $t = preg_replace('/' . $F . '(?:' . $J . '*' . $F . ')*[\x{3000}-\x{303F}\x{30FB}\x{30FC}\x{FF01}-\x{FF65}]*/u', $S, $text);
+    if ($t === $text) return $text;
+
+    $regeln = [
+        // Sprachangabe direkt davor ("chinesisch 新镇") traegt ohne ihr Wort nichts.
+        '/(?<!\p{L})\p{Ll}+isch:?[ \t]*' . $S . '/u'                  => $S,
+        '/' . $S . '(?:[ \t]*[,;\/][ \t]*' . $S . ')+/u'              => $S,
+        // Leere Klammer/Anfuehrung wird zum Platzhalter, nicht zu nichts - sonst
+        // greift die Trennerregel unten nicht mehr (", (X), etwa" -> ",, etwa").
+        '/[ \t]*[(\[][ \t,;:]*' . $S . '[ \t,;:]*[)\]]/u'             => $S,
+        '/[ \t]*[„"»«][ \t]*' . $S . '[ \t]*[“"«»]/u'                 => $S,
+        '/([(\[])[ \t]*' . $S . '[ \t]*[,;:][ \t]*/u'                 => '$1',
+        '/[ \t]*[,;:][ \t]*' . $S . '[ \t]*([)\]])/u'                 => '$1',
+        '/([(\[])[ \t]*' . $S . '[ \t]*/u'                            => '$1',
+        // Zwischen zwei Trennern: ", georgisch X, russisch" -> ", russisch".
+        '/[ \t]*[,;:][ \t]*' . $S . '[ \t]*(?=[,;:])/u'                => '',
+        '/^' . $S . '[ \t]*/mu'                                        => '',
+    ];
+    for ($runde = 0; $runde < 3; $runde++) {
+        $vorher = $t;
+        $t = preg_replace(array_keys($regeln), array_values($regeln), $t);
+        if ($t === $vorher) break;
+    }
+    $t = preg_replace('/[ \t]*' . $S . '[ \t]*(?=[\p{L}\p{N}])/u', ' ', $t);
+    return preg_replace('/[ \t]*' . $S . '/u', '', $t);
 }

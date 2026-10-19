@@ -81,6 +81,18 @@ The node occupies three ports: **UDP 43720** (pheromones), **TCP 43721** (tensor
 
 The genesis dimension is fixed at 128 (drone); there is no dimension argument. Larger tiers come from distillation, not from direct training.
 
+**Long runs: warmup and decay over steps**
+
+Warmup and cosine decay in `train_cluster.php` count in epochs. If you train a large corpus in segments (each segment one call with one epoch), you get neither, just the full learning rate throughout. Three environment variables fill that gap. They count over the Adam step counter `adam_t` stored in the checkpoint, so they carry across segment boundaries:
+
+| Variable | Effect |
+|---|---|
+| `SNAI_WARMUP_STEPS=N` | learning rate rises linearly over the first N steps |
+| `SNAI_LR_DECAY_STEPS=M` | cosine from the end of warmup to step M, floor afterwards |
+| `SNAI_LR_MIN_RATIO=r` | floor = r × learning rate (default 0.1) |
+
+Without these variables nothing changes. A recipe tried on a model with width 512, 6 layers and context 1024 (not on the 128 drone): learning rate `0.0001`, `SNAI_WARMUP_STEPS=500`, `SNAI_LR_DECAY_STEPS` = steps of the whole run, weight decay `0.1` (10th argument of `train_cluster.php`), one worker, no dropout, no label smoothing. With learning rate 0.001 and no warmup, attention saturated there within a few hundred steps; a long run with that setting never learned to copy from its context in 20 segments.
+
 **Query a model (zero-copy inference)**
 
 ```bash
@@ -126,7 +138,17 @@ For dialogue data, `[USER]`, `[SYMBIO]` and `[SYSTEM]` are registered single tok
 print('Test')</s>
 ```
 
-When a document contains these markers, **loss masking** applies: only the `[SYMBIO]` response contributes gradients, the `[USER]` text does not. The vocabulary holds 8192 tokens (`lib/symbio_vocab.json`, BPE with the `U+2581` metaspace).
+When a document contains these markers, **loss masking** applies: only the `[SYMBIO]` response contributes gradients, the `[USER]` text does not. If a custom vocabulary lacks the markers as single tokens, the worker turns masking off with a warning instead of guessing.
+
+**Vocabulary.** `lib/symbio_vocab.json` holds 8192 tokens (BPE with the `U+2581` metaspace), built from a cleaned German corpus. Characters outside the base alphabet pass through as UTF-8 bytes (256 byte tokens, `byte_fallback`), so `<unk>` no longer occurs, not even for emoji or foreign scripts. To build your own:
+
+```bash
+tools/bpe_init/bpe_forge <corpus_dir> lib/symbio_vocab.json
+```
+
+It reads every `*.txt`/`*.php` in the directory. Before training, `src/korpus_sanitize.php` (`korpus_bereinigen()`) removes runs of scripts that cannot be transliterated, together with their language label, e.g. "(chinesisch 新镇)".
+
+> ⚠️ **A new vocabulary applies since October 2026.** Models trained with the old one (up to commit `b5a3a66`) do not match it: the same token number now stands for a different piece of text. Retrain old models, or run them with the old `lib/symbio_vocab.json` from that commit.
 
 ## 💾 Model format (SNAI_V5)
 

@@ -43,6 +43,17 @@ function worker_robust_fread($fp, int $length): string {
     return $data;
 }
 
+/**
+ * 2026-10-19: Abbruch mit Exitcode 1. Ersetzt die() im ganzen Worker - die()
+ * endet mit Exitcode 0, und train_cluster.php wertet nur den Exitcode aus: ein
+ * abgebrochener Worker galt dort als gelungen. Die Meldung geht wie bei die()
+ * nach stdout, damit sie im Cluster-Log an derselben Stelle steht wie bisher.
+ */
+function worker_abbruch(string $meldung): never {
+    echo $meldung;
+    exit(1);
+}
+
 // Konstanten für Magic Numbers (Wartbarkeit)
 define('MIN_FILE_SIZE', 10);
 define('DEFAULT_LR', 0.0005);
@@ -54,7 +65,7 @@ define('DEFAULT_LR', 0.0005);
 define('RECENT_LOSS_WINDOW', 20);
 
 if ($argc < 6) {
-    die("Nutzung: php train_worker.php <input.txt> <output.snai> <epochs> <base_model> <dtype> [custom_lr] [global_epoch] [base_lr] [weight_decay] [dropout_rate] [label_smoothing]\n");
+    worker_abbruch("Nutzung: php train_worker.php <input.txt> <output.snai> <epochs> <base_model> <dtype> [custom_lr] [global_epoch] [base_lr] [weight_decay] [dropout_rate] [label_smoothing]\n");
 }
 
 $input_file  = $argv[1];
@@ -85,13 +96,13 @@ if ($base_lr <= 0.00001) {
 }
 
 if (!file_exists($base_model)) {
-    die("🚨 Fatal: Basismodell konnte nicht gefunden werden -> $base_model\n");
+    worker_abbruch("🚨 Fatal: Basismodell konnte nicht gefunden werden -> $base_model\n");
 }
 
 if (!file_exists($input_file) || filesize($input_file) < MIN_FILE_SIZE) {
     echo "  > 🚨 Warnung: Chunk ist leer oder fehlt. Kopiere Basismodell als Fallback...\n";
     if (!copy($base_model, $output_file)) {
-        die("🚨 Fatal: Konnte Basismodell nicht kopieren!\n");
+        worker_abbruch("🚨 Fatal: Konnte Basismodell nicht kopieren!\n");
     }
     // AUDIT-FIX: Ohne die Sidecar faellt der naechste Ladevorgang auf den
     // Legacy-Wert 1 Head zurueck und deutet die Attention-Gewichte um.
@@ -111,8 +122,18 @@ $vocab_limit = $tokenizer->getVocabSize();
 // hier einmalig aufgeloest statt pro Chunk neu zu encoden.
 $user_token_ids = $tokenizer->encode('[USER]');
 $symbio_token_ids = $tokenizer->encode('[SYMBIO]');
-$user_token_id = $user_token_ids[0];
-$symbio_token_id = $symbio_token_ids[0];
+// 2026-10-19: Nur maskieren, wenn beide Marker als EIN Sondertoken kodieren.
+// Vorher wurde blind das erste Token genommen; fehlt [USER] im Vokabular, ist
+// das z.B. '[' - dann schaltete jede eckige Klammer im Text das Training bis
+// zum naechsten Treffer fuer [SYMBIO] ab, ohne jede Meldung.
+if (count($user_token_ids) === 1 && count($symbio_token_ids) === 1 && $user_token_ids[0] !== $symbio_token_ids[0]) {
+    $user_token_id = $user_token_ids[0];
+    $symbio_token_id = $symbio_token_ids[0];
+} else {
+    echo "  > ⚠️ [Worker " . getmypid() . "] [USER]/[SYMBIO] sind keine Einzel-Token in diesem Vokabular - Loss-Masking AUS, jedes Token wird trainiert.\n";
+    $user_token_id = -1;
+    $symbio_token_id = -1;
+}
 
 // ============================================================================
 // FIX V2.1: Header UND Head-Zahl muessen VOR dem Konstruktor feststehen.
@@ -129,7 +150,7 @@ fclose($fp);
 
 // AUDIT-FIX: Harte Header-Validierung, um undefinierte Arrays und falsche CPU-Fallbacks zu verhindern
 if ($h_data === false || strlen($h_data) !== 20) {
-    die("🚨 [Fatal] Basismodell ist korrupt oder unvollständig (Header < 28 Bytes)!\n");
+    worker_abbruch("🚨 [Fatal] Basismodell ist korrupt oder unvollständig (Header < 28 Bytes)!\n");
 }
 
 $p = unpack('Vvocab/Vdim/Vffn/Vctx/Vlayers', $h_data);
@@ -195,11 +216,33 @@ if (method_exists($cortex, 'get_gpu_backend')) {
 
 
 $ctx = property_exists($cortex, 'ctx_size') ? $cortex->ctx_size : 512;
-if ($ctx <= 0) die("🚨 Fatal: Ungültige ctx_size ($ctx) vom Cortex gemeldet!\n");
+if ($ctx <= 0) worker_abbruch("🚨 Fatal: Ungültige ctx_size ($ctx) vom Cortex gemeldet!\n");
 
 // HINWEIS: $initial_lr ist die vom Master vorgegebene, bereits decay'te Rate für DIESE Epoche!
 $initial_lr = $custom_lr; 
 $global_step = 0;
+echo "  > [Worker " . getmypid() . "] Lernrate dieser Epoche: " . sprintf('%.10g', $initial_lr) . "\n";
+
+// 2026-10-19: Schritt-Warmup und Cosinus-Abklingen ueber Adam-Schritte.
+// Warmup und Cosinus in train_cluster.php zaehlen in EPOCHEN. Ein Segmentlauf
+// (jedes Segment ein Aufruf mit max_epochs=1) bekommt dort weder Warmup noch
+// Abklingen, sondern durchgehend die volle Lernrate. Gezaehlt wird hier ueber
+// adam_t aus dem Checkpoint, nicht ueber den Schrittzaehler dieses Prozesses:
+// der Warmup laeuft EINMAL ab dem Kaltstart und setzt ueber Segmentgrenzen
+// fort, statt an jeder Grenze neu anzulaufen.
+//   SNAI_WARMUP_STEPS=N    LR steigt linear ueber die ersten N Adam-Schritte
+//   SNAI_LR_DECAY_STEPS=M  Cosinus vom Warmup-Ende bis adam_t=M, danach Boden
+//   SNAI_LR_MIN_RATIO=r    Boden = r * LR (Vorgabe 0.1)
+// Nicht gesetzt oder 0 = aus = exakt das bisherige Verhalten.
+$warmup_steps = max(0, (int)(trim((string)getenv('SNAI_WARMUP_STEPS')) ?: 0));
+$lr_decay_steps = max(0, (int)(trim((string)getenv('SNAI_LR_DECAY_STEPS')) ?: 0));
+$lr_min_ratio = getenv('SNAI_LR_MIN_RATIO');
+$lr_min_ratio = ($lr_min_ratio === false || trim($lr_min_ratio) === '') ? 0.1 : min(1.0, max(0.0, (float)$lr_min_ratio));
+if ($lr_decay_steps > 0 && $lr_decay_steps <= $warmup_steps) {
+    worker_abbruch("🚨 SNAI_LR_DECAY_STEPS=$lr_decay_steps liegt nicht hinter SNAI_WARMUP_STEPS=$warmup_steps - das Abklingen liefe nie.\n");
+}
+$warmup_t0 = null;
+$warmup_n  = 0;
 
 for ($e = 1; $e <= $epochs; $e++) {
     $loss_sum = 0;
@@ -222,7 +265,7 @@ for ($e = 1; $e <= $epochs; $e++) {
     // niedrige einstellige MB) - unproblematisch fuer den 2048M-Limit oben.
     $full_text = file_get_contents($input_file);
     if ($full_text === false) {
-        die("🚨 Fatal: Konnte Input-File nicht lesen: $input_file\n");
+        worker_abbruch("🚨 Fatal: Konnte Input-File nicht lesen: $input_file\n");
     }
 
     if (strlen(trim($full_text)) >= 2) {
@@ -301,6 +344,27 @@ for ($e = 1; $e <= $epochs; $e++) {
 
             $global_step++;
             $current_lr = $initial_lr;
+            if ($warmup_steps > 0 || $lr_decay_steps > 0) {
+                if ($warmup_t0 === null) {
+                    $warmup_t0 = (int)$cortex->get_adam_t();
+                    if ($warmup_steps > 0) echo "  > [Warmup] $warmup_steps Schritte, Start bei adam_t=$warmup_t0, Ziel-LR $initial_lr\n";
+                    if ($lr_decay_steps > 0) echo "  > [LR-Decay] Cosinus bis adam_t=$lr_decay_steps, Boden " . sprintf('%.7f', $initial_lr * $lr_min_ratio) . "\n";
+                }
+                $warmup_n++;
+                $warmup_t = $warmup_t0 + $warmup_n;
+                if ($warmup_t < $warmup_steps) {
+                    $current_lr = $initial_lr * $warmup_t / $warmup_steps;
+                } elseif ($lr_decay_steps > $warmup_steps) {
+                    $lr_progress = min(1.0, ($warmup_t - $warmup_steps) / ($lr_decay_steps - $warmup_steps));
+                    $current_lr = $initial_lr * ($lr_min_ratio + (1.0 - $lr_min_ratio) * 0.5 * (1.0 + cos(M_PI * $lr_progress)));
+                }
+                if ($warmup_steps > 0 && ($warmup_n === 1 || $warmup_t === $warmup_steps)) {
+                    echo "  > [Warmup] adam_t=$warmup_t LR=" . sprintf('%.7f', $current_lr) . "\n";
+                }
+                if ($lr_decay_steps > 0 && ($warmup_n === 1 || $warmup_t === $lr_decay_steps)) {
+                    echo "  > [LR-Decay] adam_t=$warmup_t LR=" . sprintf('%.7f', $current_lr) . "\n";
+                }
+            }
 
             // Bounds Check
             $max_id = max($batch_in);
@@ -386,14 +450,14 @@ echo "  > [Worker " . getmypid() . "] Training abgeschlossen. Extrahiere aktuali
 if (method_exists($cortex, 'extract_state')) {
     $state_array = $cortex->extract_state();
     if ($state_array === false || $state_array === null) {
-        die("🚨 [Worker " . getmypid() . "] FATAL: extract_state() lieferte ungültiges Ergebnis!\n");
+        worker_abbruch("🚨 [Worker " . getmypid() . "] FATAL: extract_state() lieferte ungültiges Ergebnis!\n");
     }
 } else {
-    die("🚨 [Worker " . getmypid() . "] FATAL: Konnte Gewichte nicht aus C-RAM extrahieren (Methode fehlt)!\n");
+    worker_abbruch("🚨 [Worker " . getmypid() . "] FATAL: Konnte Gewichte nicht aus C-RAM extrahieren (Methode fehlt)!\n");
 }
 
 if (!function_exists('save_model_stream')) {
-    die("🚨 Fatal: 'save_model_stream' nicht in tensor_io.php gefunden!\n");
+    worker_abbruch("🚨 Fatal: 'save_model_stream' nicht in tensor_io.php gefunden!\n");
 }
 
 try {
@@ -403,7 +467,7 @@ try {
     write_num_heads($output_file, $num_heads);
     echo "  > ✅ [Erfolg] Arbeiter-Gewichte via Stream gesichert unter $output_file\n";
 } catch (Exception $e) {
-    die("🚨 Fatal: Fehlschlag beim Speichern des Modells: " . $e->getMessage() . "\n");
+    worker_abbruch("🚨 Fatal: Fehlschlag beim Speichern des Modells: " . $e->getMessage() . "\n");
 }
 
 exit(0);

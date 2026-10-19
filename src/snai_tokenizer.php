@@ -19,6 +19,8 @@ class SnaiTokenizer {
     private $inverse_vocab = [];
     private $bpe_ranks = [];
     private $cache = []; 
+    private $byte_ids = null;
+    private $byte_of_id = [];
     
     // Wir nutzen die Hex-Repräsentation von U+2581 für absolute Sicherheit in PHP
     private const META_SPACE = "\xE2\x96\x81"; 
@@ -38,6 +40,18 @@ class SnaiTokenizer {
         $this->vocab = $data['model']['vocab'];
         $this->inverse_vocab = array_flip($this->vocab);
         
+        // Byte-Rueckfall nur, wenn das Vokabular alle 256 Byte-Token traegt.
+        if (isset($this->vocab['<0x00>'])) {
+            for ($b = 0; $b < 256; $b++) {
+                $key = sprintf('<0x%02X>', $b);
+                if (!isset($this->vocab[$key])) {
+                    die("🚨 FATAL: '$vocab_file' hat <0x00>, aber $key fehlt - Byte-Rueckfall unvollstaendig.\n");
+                }
+                $this->byte_ids[$b] = $this->vocab[$key];
+                $this->byte_of_id[$this->vocab[$key]] = chr($b);
+            }
+        }
+
         if (isset($data['model']['merges'])) {
             foreach ($data['model']['merges'] as $i => $merge) {
                 $merge_str = is_array($merge) ? implode(' ', $merge) : (string)$merge;
@@ -182,7 +196,13 @@ class SnaiTokenizer {
                 $bpe_str = $this->bpe($chunk);
                 $bpe_parts = explode(' ', $bpe_str);
                 foreach ($bpe_parts as $bpe_part) {
-                    $bpe_tokens[] = $this->vocab[$bpe_part] ?? ($this->vocab['<unk>'] ?? 0);
+                    if (isset($this->vocab[$bpe_part])) {
+                        $bpe_tokens[] = $this->vocab[$bpe_part];
+                    } elseif ($this->byte_ids !== null) {
+                        foreach (unpack('C*', $bpe_part) as $b) $bpe_tokens[] = $this->byte_ids[$b];
+                    } else {
+                        $bpe_tokens[] = $this->vocab['<unk>'] ?? 0;
+                    }
                 }
             }
         }
@@ -193,8 +213,13 @@ class SnaiTokenizer {
     public function decode(array $token_ids, bool $do_trim = false): string {
         $text = "";
         
+        // Byte-Token werden als rohes Byte ausgegeben, auch einzeln: die
+        // Inferenz dekodiert Token fuer Token und setzt den Strom so wieder
+        // zu gueltigem UTF-8 zusammen.
         foreach ($token_ids as $id) {
-            if (isset($this->inverse_vocab[$id])) {
+            if (isset($this->byte_of_id[$id])) {
+                $text .= $this->byte_of_id[$id];
+            } elseif (isset($this->inverse_vocab[$id])) {
                 $text .= $this->inverse_vocab[$id];
             }
         }

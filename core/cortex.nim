@@ -737,7 +737,10 @@ proc attentionForwardBatchedD(state: ptr CortexState, l, act: cint) =
     for d in 0 ..< dim: out_p[d] = 0.0
     for h in 0 ..< numHeads:
       let h_off = h * headSize
-      var max_s: cfloat = -9999.0
+      # 2026-10-19: Startwert NegInf statt -9999.0, an allen Softmax-Stellen.
+      # Lagen alle Scores unter -9999, wurde sum_e 0 und das Ergebnis NaN
+      # (gemessen im LoRA-Fork: kleinster Score -4457 und wachsend).
+      var max_s: cfloat = NegInf.cfloat
       for t in 0 .. p:
         let tk = cast[ptr FloatArray](addr state.k_cache[l].data[t * dim])
         var sc: cfloat = 0.0
@@ -789,7 +792,7 @@ proc attentionBackwardBatchedD(state: ptr CortexState, l, act: cint) =
     for d in 0 ..< dim: d_q_p[d] = 0.0
     for h in 0 ..< numHeads:
       let h_off = h * headSize
-      var max_s: cfloat = -9999.0
+      var max_s: cfloat = NegInf.cfloat
       for t in 0 .. p:
         let k_t = cast[ptr FloatArray](addr state.k_cache[l].data[t * dim])
         var sc: cfloat = 0.0
@@ -1449,7 +1452,7 @@ proc cortex_forward*(state: ptr CortexState, raw_in: ptr cint, num_tok: cint, ra
             
           for h in 0 ..< state.numHeads:
             let h_off = h * state.headSize
-            var max_s: cfloat = -9999.0
+            var max_s: cfloat = NegInf.cfloat
             for t in 0 .. pos:
               let tk = cast[ptr FloatArray](addr state.k_cache[l].data[t * state.hiddenDim])
               var sc: cfloat = 0.0
@@ -1616,7 +1619,7 @@ proc cortex_train_step*(state: ptr CortexState, raw_in: ptr cint, raw_tg: ptr ci
         for d in 0 ..< state.hiddenDim:
           state.act_norm_final[off_dim + d] = state.norm_buf[d]
       else:
-        var max_l: cfloat = -9999.0
+        var max_l: cfloat = NegInf.cfloat
         let logits = cast[ptr FloatArray](addr state.logits_cache.data[p * state.vocabSize])
         matVecMul(state.w_out, state.norm_buf, logits)
         for v in 0 ..< state.vocabSize:
@@ -1667,7 +1670,7 @@ proc cortex_train_step*(state: ptr CortexState, raw_in: ptr cint, raw_tg: ptr ci
 
           for h in 0 ..< state.numHeads:
             let h_off = h * state.headSize
-            var max_s: cfloat = -9999.0
+            var max_s: cfloat = NegInf.cfloat
             for t in 0 .. pos:
               let tk = cast[ptr FloatArray](addr state.k_cache[l].data[t * state.hiddenDim])
               var sc: cfloat = 0.0
@@ -1723,7 +1726,7 @@ proc cortex_train_step*(state: ptr CortexState, raw_in: ptr cint, raw_tg: ptr ci
       for d in 0 ..< state.hiddenDim:
         state.act_norm_final[off_dim + d] = state.norm_buf[d]
     else:
-      var max_l: cfloat = -9999.0
+      var max_l: cfloat = NegInf.cfloat
       let logits = cast[ptr FloatArray](addr state.logits_cache.data[pos * state.vocabSize])
       matVecMul(state.w_out, state.norm_buf, logits)
       for v in 0 ..< state.vocabSize:
@@ -1753,7 +1756,7 @@ proc cortex_train_step*(state: ptr CortexState, raw_in: ptr cint, raw_tg: ptr ci
       var tgid = t_tg[pos]
       if tgid < 0 or tgid >= state.vocabSize: tgid = 0
       let base = pos * state.vocabSize
-      var max_l: cfloat = -9999.0
+      var max_l: cfloat = NegInf.cfloat
       for v in 0 ..< state.vocabSize:
         if logits_all[base + v] > max_l: max_l = logits_all[base + v]
       var sum_p: cfloat = 0.0
@@ -1950,7 +1953,7 @@ proc cortex_train_step*(state: ptr CortexState, raw_in: ptr cint, raw_tg: ptr ci
           for h in 0 ..< state.numHeads:
             let h_off = h * state.headSize
             let scale = 1.0 / sqrt(state.headSize.float32)
-            var max_s: cfloat = -9999.0
+            var max_s: cfloat = NegInf.cfloat
             for t in 0 .. pos:
               let k_t = cast[ptr FloatArray](addr state.k_cache[l].data[t * state.hiddenDim])
               var sc: cfloat = 0.0

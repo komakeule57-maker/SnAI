@@ -81,6 +81,18 @@ Der Node belegt dabei drei Ports: **UDP 43720** (Pheromone), **TCP 43721** (Tens
 
 Die Genesis-Dimension liegt fest bei 128 (Drohne); ein Dimensions-Argument gibt es nicht. Höhere Stufen entstehen durch Destillation, nicht durch direktes Training.
 
+**Lange Läufe: Warmup und Abklingen über Schritte**
+
+Warmup und Cosinus-Abklingen von `train_cluster.php` zählen in Epochen. Wer einen großen Korpus in Segmenten trainiert (jedes Segment ein Aufruf mit einer Epoche), bekommt dort weder das eine noch das andere, sondern durchgehend die volle Lernrate. Dafür gibt es drei Umgebungsvariablen, die über den Adam-Schrittzähler `adam_t` im Checkpoint zählen und deshalb über Segmentgrenzen hinweg fortlaufen:
+
+| Variable | Wirkung |
+|---|---|
+| `SNAI_WARMUP_STEPS=N` | Lernrate steigt linear über die ersten N Schritte |
+| `SNAI_LR_DECAY_STEPS=M` | Cosinus vom Warmup-Ende bis Schritt M, danach Boden |
+| `SNAI_LR_MIN_RATIO=r` | Boden = r × Lernrate (Vorgabe 0,1) |
+
+Ohne diese Variablen bleibt alles wie bisher. Ein Rezept, das an einem Modell mit Breite 512, 6 Schichten und Kontext 1024 erprobt ist (nicht an der 128er-Drohne): Lernrate `0.0001`, `SNAI_WARMUP_STEPS=500`, `SNAI_LR_DECAY_STEPS` = Schritte des ganzen Laufs, Weight Decay `0.1` (10. Argument von `train_cluster.php`), ein Worker, kein Dropout, kein Label-Smoothing. Mit Lernrate 0,001 ohne Warmup sättigte dort die Attention binnen weniger hundert Schritte; ein Langlauf mit dieser Einstellung lernte über 20 Segmente nie, aus dem Kontext zu kopieren.
+
 **Modell befragen (Zero-Copy Inferenz)**
 
 ```bash
@@ -124,7 +136,17 @@ Für Dialogdaten sind `[USER]`, `[SYMBIO]` und `[SYSTEM]` registrierte Einzel-To
 print('Test')</s>
 ```
 
-Enthält ein Dokument diese Marker, greift **Loss-Masking**: nur die `[SYMBIO]`-Antwort liefert Gradienten, der `[USER]`-Text nicht. Das Vokabular umfasst 8192 Token (`lib/symbio_vocab.json`, BPE mit Metaspace `U+2581`).
+Enthält ein Dokument diese Marker, greift **Loss-Masking**: nur die `[SYMBIO]`-Antwort liefert Gradienten, der `[USER]`-Text nicht. Fehlen die Marker in einem eigenen Vokabular als Einzel-Tokens, schaltet der Worker das Masking mit einer Warnung ab, statt zu raten.
+
+**Vokabular.** `lib/symbio_vocab.json` umfasst 8192 Token (BPE mit Metaspace `U+2581`), gebaut aus einem bereinigten deutschen Korpus. Zeichen, die nicht im Grundalphabet stehen, gehen als UTF-8-Bytes durch (256 Byte-Token, `byte_fallback`). Es entsteht also kein `<unk>` mehr, auch nicht bei Emoji oder fremden Schriften. Ein eigenes Vokabular baut
+
+```bash
+tools/bpe_init/bpe_forge <korpus_ordner> lib/symbio_vocab.json
+```
+
+aus allen `*.txt`/`*.php` des Ordners. `src/korpus_sanitize.php` (`korpus_bereinigen()`) streicht vor dem Training Läufe in nicht transliterierbaren Schriften samt Sprachangabe, z. B. „(chinesisch 新镇)“.
+
+> ⚠️ **Seit Oktober 2026 gilt ein neues Vokabular.** Modelle, die mit dem alten (bis Commit `b5a3a66`) trainiert wurden, passen nicht dazu: dieselbe Token-Nummer steht jetzt für ein anderes Stück Text. Alte Modelle neu trainieren oder mit dem alten `lib/symbio_vocab.json` aus jenem Commit betreiben.
 
 ## 💾 Modellformat (SNAI_V5)
 
