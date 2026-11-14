@@ -1,0 +1,516 @@
+<?php
+/**
+ * Datei: train_worker.php
+ * Funktion: Lokaler CLI-Worker für das Training der SNAI-Modelle. 
+ * Liest Text-Chunks, tokenisiert sie, füttert die C-Bridge 
+ * und speichert die Gewichte per Stream.
+ * * SYMBIO NANO-AI FRAMEWORK (Code-4372)
+ * Modul: Worker Training Node (Phase V - OOM Zero Edition)
+ * -------------------------------------------------------------------------
+ * MAXIME: E > H. Verarbeitet Chunks dynamischer Länge. 
+ * AUDIT-V9.4: Array-Slice GC-Shredder in der Hot-Loop eliminiert.
+ * AUDIT-FIX: UTF-8 Notfall-Cut repariert, Header-Validierung hinzugefügt.
+ * VERSION: V2.1 - Initialisierungsreihenfolge korrigiert (num_heads vor Konstruktor).
+ */
+
+// AUDIT-FIX (2026-08-11): siehe snai_daemon.php - date.timezone-Ini steht auf
+// UTC statt Europe/Berlin (betrifft hier tensor_ffi_adapter.php's date()-Aufrufe).
+date_default_timezone_set('Europe/Berlin');
+// Limit auf 2048M hochgesetzt, da extract_state() am Ende kurzzeitig RAM für das gesamte Modell benötigt (E>H Sweetspot)
+ini_set('memory_limit', '2048M');
+require_once 'snai_tokenizer.php';
+require_once 'tensor_io.php';
+require_once 'tensor_ffi_adapter.php';
+require_once __DIR__ . '/head_config.php';
+require_once __DIR__ . '/growth_config.php';
+
+// LR-Boost fuer frisch Net2Net-expandierte Parameter.
+// Faktor bewusst moderat gewaehlt als Startwert - Feintuning folgt empirisch.
+define('GROWTH_LR_BOOST', 3.0);
+
+/**
+ * AUDIT-FIX: fread() liefert auf Netzwerk-Mounts (GVFS/SMB/NFS) regelmaessig
+ * weniger Bytes als angefordert, ohne Fehler zu melden. Der Header-Read lief
+ * dadurch in "Basismodell ist korrupt", obwohl die Datei in Ordnung war.
+ */
+function worker_robust_fread($fp, int $length): string {
+    $data = '';
+    while (strlen($data) < $length && !feof($fp)) {
+        $chunk = fread($fp, $length - strlen($data));
+        if ($chunk === false || $chunk === '') break;
+        $data .= $chunk;
+    }
+    return $data;
+}
+
+/**
+ * 2026-10-19: Abbruch mit Exitcode 1. Ersetzt die() im ganzen Worker - die()
+ * endet mit Exitcode 0, und train_cluster.php wertet nur den Exitcode aus: ein
+ * abgebrochener Worker galt dort als gelungen. Die Meldung geht wie bei die()
+ * nach stdout, damit sie im Cluster-Log an derselben Stelle steht wie bisher.
+ */
+function worker_abbruch(string $meldung): never {
+    echo $meldung;
+    exit(1);
+}
+
+// Konstanten für Magic Numbers (Wartbarkeit)
+define('MIN_FILE_SIZE', 10);
+define('DEFAULT_LR', 0.0005);
+// Update 2026-08-09: Fenstergroesse fuer den "Loss der
+// letzten N Schritte" (siehe RECENT_LOSS= unten) - bewusst deutlich kleiner
+// als typische Epochenlaengen (haeufig mehrere hundert bis tausend Schritte),
+// damit der Wert den Endstand der Epoche widerspiegelt statt vom
+// Epochenanfang verwaessert zu werden.
+define('RECENT_LOSS_WINDOW', 20);
+
+if ($argc < 6) {
+    worker_abbruch("Nutzung: php train_worker.php <input.txt> <output.snai> <epochs> <base_model> <dtype> [custom_lr] [global_epoch] [base_lr] [weight_decay] [dropout_rate] [label_smoothing]\n");
+}
+
+$input_file  = $argv[1];
+$output_file = $argv[2];
+$epochs      = (int)$argv[3];
+$base_model  = $argv[4];
+$dtype       = (int)$argv[5];
+$custom_lr   = isset($argv[6]) ? (float)$argv[6] : DEFAULT_LR;
+$global_epoch = isset($argv[7]) ? (int)$argv[7] : 1;
+$base_lr     = isset($argv[8]) ? (float)$argv[8] : DEFAULT_LR;
+// Optionale Regularisierung (Engine-Hooks existierten bereits in cortex.nim,
+// wurden aber nirgends aufgerufen - Punkt 2 der
+// Memorierungs-Gegenmassnahmen). Default 0.0 = No-Op, damit bestehende
+// Aufrufe ohne diese Argumente exakt gleich verhalten wie bisher.
+$weight_decay = isset($argv[9]) ? (float)$argv[9] : 0.0;
+$dropout_rate = isset($argv[10]) ? (float)$argv[10] : 0.0;
+// Update 2026-08-15 ("Naechste Schritte" Punkt 7): als
+// letzter positioneller Arg angehaengt statt mittendrin eingefuegt - sonst
+// verschieben sich alle nachfolgenden argv[N]-Indizes.
+$label_smoothing = isset($argv[11]) ? (float)$argv[11] : 0.0;
+
+echo "=== [WORKER " . getmypid() . "] INITIALISIERE SCHMIEDE ===\n";
+
+// Sanity Check Lernrate
+if ($custom_lr <= 0) $custom_lr = DEFAULT_LR;
+if ($base_lr <= 0.00001) {
+    echo "  > [Worker " . getmypid() . "] 🌙 Traum-Modus aktiv (Experience Replay).\n";
+}
+
+if (!file_exists($base_model)) {
+    worker_abbruch("🚨 Fatal: Basismodell konnte nicht gefunden werden -> $base_model\n");
+}
+
+if (!file_exists($input_file) || filesize($input_file) < MIN_FILE_SIZE) {
+    echo "  > 🚨 Warnung: Chunk ist leer oder fehlt. Kopiere Basismodell als Fallback...\n";
+    if (!copy($base_model, $output_file)) {
+        worker_abbruch("🚨 Fatal: Konnte Basismodell nicht kopieren!\n");
+    }
+    // AUDIT-FIX: Ohne die Sidecar faellt der naechste Ladevorgang auf den
+    // Legacy-Wert 1 Head zurueck und deutet die Attention-Gewichte um.
+    $fallback_sidecar = head_sidecar_path($base_model);
+    if (file_exists($fallback_sidecar)) {
+        @copy($fallback_sidecar, head_sidecar_path($output_file));
+    }
+    propagate_growth_sidecar($base_model, $output_file);
+    exit(0);
+}
+
+$tokenizer = new SnaiTokenizer();
+$vocab_limit = $tokenizer->getVocabSize();
+
+// Loss-Masking auf [USER]-Tokens: [USER]
+// und [SYMBIO] sind registrierte Einzel-Tokens (siehe snai_tokenizer.php),
+// hier einmalig aufgeloest statt pro Chunk neu zu encoden.
+$user_token_ids = $tokenizer->encode('[USER]');
+$symbio_token_ids = $tokenizer->encode('[SYMBIO]');
+// 2026-10-19: Nur maskieren, wenn beide Marker als EIN Sondertoken kodieren.
+// Vorher wurde blind das erste Token genommen; fehlt [USER] im Vokabular, ist
+// das z.B. '[' - dann schaltete jede eckige Klammer im Text das Training bis
+// zum naechsten Treffer fuer [SYMBIO] ab, ohne jede Meldung.
+if (count($user_token_ids) === 1 && count($symbio_token_ids) === 1 && $user_token_ids[0] !== $symbio_token_ids[0]) {
+    $user_token_id = $user_token_ids[0];
+    $symbio_token_id = $symbio_token_ids[0];
+} else {
+    echo "  > ⚠️ [Worker " . getmypid() . "] [USER]/[SYMBIO] sind keine Einzel-Token in diesem Vokabular - Loss-Masking AUS, jedes Token wird trainiert.\n";
+    $user_token_id = -1;
+    $symbio_token_id = -1;
+}
+
+// ============================================================================
+// FIX V2.1: Header UND Head-Zahl muessen VOR dem Konstruktor feststehen.
+// In V2 stand der Header-Read weiterhin hinter "new SnaiCortexBridge(...)",
+// waehrend der Konstruktor bereits $num_heads erwartete -> "Undefined variable"
+// und sofortiger Fatal Error in jedem Worker.
+// ============================================================================
+
+// --- 1. Header lesen (vor allem anderen) ---
+$fp = fopen($base_model, 'rb');
+worker_robust_fread($fp, 8); // Skip Magic
+$h_data = worker_robust_fread($fp, 20);
+fclose($fp);
+
+// AUDIT-FIX: Harte Header-Validierung, um undefinierte Arrays und falsche CPU-Fallbacks zu verhindern
+if ($h_data === false || strlen($h_data) !== 20) {
+    worker_abbruch("🚨 [Fatal] Basismodell ist korrupt oder unvollständig (Header < 28 Bytes)!\n");
+}
+
+$p = unpack('Vvocab/Vdim/Vffn/Vctx/Vlayers', $h_data);
+$model_dim = $p['dim'];
+
+// --- 2. Head-Zahl aufloesen ---
+// num_heads ist NICHT im .cortex-Header persistiert. Ein bereits trainierter
+// Checkpoint hat headSize implizit in seinen Gewichten "eingebrannt" - wird er
+// mit einer anderen Head-Zahl geladen, bleiben die Zahlen gleich, ihre Bedeutung
+// (RoPE-Rotation, Attention-Segmentierung) aendert sich komplett. Deshalb liegt
+// die Head-Zahl in einer Sidecar-Datei neben dem Modell und wird NIE aus der
+// Modellgroesse neu geraten, sobald sie einmal feststeht.
+require_once __DIR__ . '/head_config.php';
+$num_heads = resolve_num_heads($base_model, $model_dim);
+echo "  > [Heads] $num_heads Attention-Heads (headSize=" . intdiv($model_dim, $num_heads) . ") fuer dieses Modell.\n";
+
+// --- 3. DER INJEKTOR (jetzt mit gueltigem $num_heads) ---
+$cortex = new SnaiCortexBridge($base_model, $num_heads);
+
+// --- 3b. Net2Net-Wachstumsgrenze aufloesen (LR-Boost fuer frische Parameter) ---
+// Sidecar existiert nur, wenn $base_model aus einer Expansion in dieser
+// Synthese-Session stammt (siehe growth_config.php) - sonst kein Boost,
+// identisch zum bisherigen Verhalten.
+$growth = resolve_growth_boundary($base_model);
+if ($growth !== null && method_exists($cortex, 'set_growth_boundary')) {
+    [$g_old_dim, $g_old_ffn, $g_old_layers] = $growth;
+    $cortex->set_growth_boundary($g_old_dim, $g_old_ffn, $g_old_layers, GROWTH_LR_BOOST);
+    echo "  > [Growth] Net2Net-Grenze erkannt (alt: dim=$g_old_dim, ffn=$g_old_ffn, layers=$g_old_layers) -> LR-Boost " . GROWTH_LR_BOOST . "x fuer frische Parameter aktiv.\n";
+}
+
+// --- 3c. Regularisierung (Weight-Decay/Dropout), nur falls explizit > 0 ---
+if ($weight_decay > 0.0 && method_exists($cortex, 'set_weight_decay')) {
+    $cortex->set_weight_decay($weight_decay);
+    echo "  > [Regularisierung] AdamW-Weight-Decay aktiv: $weight_decay\n";
+}
+// 2026-11-03: Weight Decay faellt mit der Lernrate (AdamC, Defazio 2025, arXiv:2506.02285):
+// wd_t = wd * lr_t / lr_max. Der Kern rechnet entkoppelt w -= lr*wd*w (core/cortex.nim adamStep).
+// Bei festem wd und fallender LR zieht der Decay die Gewichte relativ immer staerker gegen den
+// Gradienten; die Gewichte vor den RMSNorms schrumpfen, die Gradientennorm steigt. Gemessen an
+// 128x4 (8-Bit-Pfad und float32-Nachbau, 11 Laeufe): WD auf ein Viertel bei LR auf ein Viertel
+// verbesserte den Held-out um rund 0,036 nats und halbierte den Normanstieg oder mehr.
+//   SNAI_WD_LR_REF=<lr_max>  Spitzen-LR des ganzen Plans (Segmentketten mit eigener LR je Segment)
+//   SNAI_WD_LR_REF=auto      lr_max = base_lr (8. Argument): Spitze des Epochen-Plans von
+//                            train_cluster.php; in Segmentlaeufen (max_epochs=1) ist das die
+//                            Segment-LR, der Decay folgt dann dem Schritt-Plan dieses Workers
+//                            (SNAI_WARMUP_STEPS/SNAI_LR_DECAY_STEPS). Traum-Modus: keine Umrechnung.
+// Nachgefuehrt wird bei JEDEM Schritt, weil Warmup und Cosinus die LR im Worker veraendern; der Kern
+// liest den Wert bei jedem Adam-Aufruf (CPU, OpenCL, CUDA). Nicht gesetzt = exakt wie bisher.
+$adamc_ref = null;
+$adamc_wd_gesetzt = null;
+$adamc_env = trim((string)getenv('SNAI_WD_LR_REF'));
+if ($adamc_env !== '' && $weight_decay > 0.0) {
+    if ($adamc_env === 'auto' && $base_lr <= 0.00001) {
+        echo "  > [AdamC] Traum-Modus: Weight Decay bleibt fest bei $weight_decay\n";
+    } else {
+        $adamc_ref = ($adamc_env === 'auto') ? $base_lr : (float)$adamc_env;
+        if ($adamc_ref <= 0.0) worker_abbruch("🚨 Fatal: SNAI_WD_LR_REF='$adamc_env' ist keine positive Lernrate.\n");
+        if ($custom_lr > $adamc_ref * 1.000001) {
+            worker_abbruch("🚨 Fatal: LR $custom_lr liegt ueber SNAI_WD_LR_REF $adamc_ref - die Referenz muss die Spitzen-LR des Plans sein.\n");
+        }
+        if (!method_exists($cortex, 'set_weight_decay')) worker_abbruch("🚨 Fatal: SNAI_WD_LR_REF gesetzt, aber set_weight_decay() fehlt in der Bridge.\n");
+        echo "  > [AdamC] Weight Decay folgt der LR: $weight_decay * lr / $adamc_ref\n";
+    }
+}
+if ($dropout_rate > 0.0 && method_exists($cortex, 'set_dropout_rate')) {
+    $cortex->set_dropout_rate($dropout_rate);
+    echo "  > [Regularisierung] FFN-Dropout aktiv: $dropout_rate\n";
+}
+if ($label_smoothing > 0.0 && method_exists($cortex, 'set_label_smoothing')) {
+    $cortex->set_label_smoothing($label_smoothing);
+    echo "  > [Regularisierung] Label-Smoothing aktiv: $label_smoothing\n";
+}
+
+// --- 4. ⚡ PHASE VI: OpenCL JIT (NUR AB 512 DIM) ---
+if (method_exists($cortex, 'init_gpu') && $model_dim >= 512) {
+    echo "  > [VRAM] Modell hat {$model_dim} Dim. Aktiviere GPU-Beschleunigung...\n";
+    $cortex->init_gpu();
+} else {
+    // AUDIT-FIX: Meldung sagte "(< 256)", die tatsaechliche Schwelle oben ist 512 -
+    // Copy-Paste-Rest einer alten Version, hat nichts mit der Gate-Logik zu tun.
+    echo "  > [CPU] Modell hat {$model_dim} Dim (< 512). Bleibe auf CPU (PCIe-Overhead Schutz)...\n";
+}
+
+// Update 2026-08-09 (Nachruest-Paket #8 "Backend-/Hardware-
+// Telemetrie"): parsebare Zeile fuer train_cluster.php, unabhaengig davon, ob
+// oben ueberhaupt init_gpu() gerufen wurde (dann bleibt es beim Default 0/NONE).
+if (method_exists($cortex, 'get_gpu_backend')) {
+    $backend_names = [0 => 'NONE', 1 => 'OPENCL', 2 => 'CUDA'];
+    $backend_id = $cortex->get_gpu_backend();
+    echo "GPU_BACKEND=" . ($backend_names[$backend_id] ?? 'UNKNOWN') . "\n";
+}
+
+
+$ctx = property_exists($cortex, 'ctx_size') ? $cortex->ctx_size : 512;
+if ($ctx <= 0) worker_abbruch("🚨 Fatal: Ungültige ctx_size ($ctx) vom Cortex gemeldet!\n");
+
+// HINWEIS: $initial_lr ist die vom Master vorgegebene, bereits decay'te Rate für DIESE Epoche!
+$initial_lr = $custom_lr; 
+$global_step = 0;
+echo "  > [Worker " . getmypid() . "] Lernrate dieser Epoche: " . sprintf('%.10g', $initial_lr) . "\n";
+
+// 2026-10-19: Schritt-Warmup und Cosinus-Abklingen ueber Adam-Schritte.
+// Warmup und Cosinus in train_cluster.php zaehlen in EPOCHEN. Ein Segmentlauf
+// (jedes Segment ein Aufruf mit max_epochs=1) bekommt dort weder Warmup noch
+// Abklingen, sondern durchgehend die volle Lernrate. Gezaehlt wird hier ueber
+// adam_t aus dem Checkpoint, nicht ueber den Schrittzaehler dieses Prozesses:
+// der Warmup laeuft EINMAL ab dem Kaltstart und setzt ueber Segmentgrenzen
+// fort, statt an jeder Grenze neu anzulaufen.
+//   SNAI_WARMUP_STEPS=N    LR steigt linear ueber die ersten N Adam-Schritte
+//   SNAI_LR_DECAY_STEPS=M  Cosinus vom Warmup-Ende bis adam_t=M, danach Boden
+//   SNAI_LR_MIN_RATIO=r    Boden = r * LR (Vorgabe 0.1)
+// Nicht gesetzt oder 0 = aus = exakt das bisherige Verhalten.
+$warmup_steps = max(0, (int)(trim((string)getenv('SNAI_WARMUP_STEPS')) ?: 0));
+$lr_decay_steps = max(0, (int)(trim((string)getenv('SNAI_LR_DECAY_STEPS')) ?: 0));
+$lr_min_ratio = getenv('SNAI_LR_MIN_RATIO');
+$lr_min_ratio = ($lr_min_ratio === false || trim($lr_min_ratio) === '') ? 0.1 : min(1.0, max(0.0, (float)$lr_min_ratio));
+if ($lr_decay_steps > 0 && $lr_decay_steps <= $warmup_steps) {
+    worker_abbruch("🚨 SNAI_LR_DECAY_STEPS=$lr_decay_steps liegt nicht hinter SNAI_WARMUP_STEPS=$warmup_steps - das Abklingen liefe nie.\n");
+}
+$warmup_t0 = null;
+$warmup_n  = 0;
+
+for ($e = 1; $e <= $epochs; $e++) {
+    $loss_sum = 0;
+    $steps = 0;
+    // Update 2026-08-09: rollierender Puffer der letzten
+    // RECENT_LOSS_WINDOW Einzelschritt-Losses - siehe RECENT_LOSS= am Ende der
+    // Mini-Batch-Schleife unten. Pro Epoche zurueckgesetzt (kein
+    // epochenuebergreifender Puffer), damit der Wert immer den Endstand
+    // GENAU DIESER Epoche zeigt.
+    $recent_losses = [];
+
+    // AUDIT-FIX ("Batch-Shuffling zwischen Epochen"): die
+    // Chunk-Datei wird jetzt einmalig komplett gelesen und am Stueck
+    // tokenisiert statt in 1-MB-Leseputtern - dadurch entfaellt der bisherige
+    // Whitespace-/UTF-8-Notfall-Cut an Pufferrgrenzen (unnoetig, sobald keine
+    // Puffergrenzen mehr existieren) UND es steht die vollstaendige
+    // Fenster-Liste vor dem ersten Trainingsschritt fest, sodass ihre
+    // Reihenfolge gemischt werden kann. Chunk-Dateien sind bereits von
+    // train_cluster.php pro Worker vorab aufgeteilt (typischerweise
+    // niedrige einstellige MB) - unproblematisch fuer den 2048M-Limit oben.
+    $full_text = file_get_contents($input_file);
+    if ($full_text === false) {
+        worker_abbruch("🚨 Fatal: Konnte Input-File nicht lesen: $input_file\n");
+    }
+
+    if (strlen(trim($full_text)) >= 2) {
+        $tokens = $tokenizer->encode($full_text);
+        unset($full_text);
+        $total_tokens = count($tokens);
+        $batch_size = $ctx;
+
+        // Loss-Masking: Rollen-Scan ueber den kompletten Token-Stream, EINMAL
+        // pro Chunk statt pro Fenster. Default true (trainierbar) - GEN-Chunks
+        // ohne [USER]/[SYMBIO]-Marker bleiben dadurch automatisch komplett
+        // trainierbar, keine Sonderbehandlung nach Tier noetig. Das Marker-
+        // Token selbst bekommt die NEUE Rolle (der Rollenwechsel ist selbst
+        // ein lernbares Signal).
+        $role = [];
+        $current_role = true;
+        foreach ($tokens as $idx => $tok) {
+            if ($tok === $user_token_id) $current_role = false;
+            elseif ($tok === $symbio_token_id) $current_role = true;
+            $role[$idx] = $current_role;
+        }
+
+        // Fenster-Startpositionen (0, ctx, 2*ctx, ...) sammeln, dann
+        // deterministisch pro (globaler Epoche, interner Epoche, Chunk-Datei)
+        // mischen - deterministisch statt echt zufaellig, damit ein Neustart
+        // mit demselben global_epoch dieselbe Reihenfolge reproduziert (es
+        // gibt keinen Intra-Epochen-Fortschritts-State, ein Neustart
+        // wiederholt die Epoche ohnehin komplett).
+        $offsets = [];
+        for ($i = 0; $i < $total_tokens - 1; $i += $batch_size) {
+            $offsets[] = $i;
+        }
+        mt_srand(crc32($global_epoch . ':' . $e . ':' . $input_file));
+        shuffle($offsets);
+
+        // === MINI-BATCH SCHLEIFE (VETO-FIX: Array Slice GC-Shredder behoben) ===
+        foreach ($offsets as $i) {
+            // AUDIT-FIX: Vorher wurde erst ein voller Batch geschnitten und dann
+            // per "$i + $actual_len >= $total_tokens" abgebrochen. Bei
+            // $total_tokens <= $batch_size galt das schon im ERSTEN Durchlauf
+            // (0 + total >= total) -> null Trainingsschritte, das Modell wurde
+            // trotzdem als fertiger Experte gespeichert. Zusaetzlich fiel bei
+            // langen Texten immer der letzte Teil-Batch unter den Tisch.
+            //
+            // Jetzt wird die Laenge vorab begrenzt: fuer ein Paar (in, out) mit
+            // out = in um 1 verschoben stehen ab Position $i genau
+            // ($total_tokens - 1 - $i) Tokens zur Verfuegung.
+            $actual_len = min($batch_size, $total_tokens - 1 - $i);
+            if ($actual_len < 1) continue;
+
+            $batch_in  = array_slice($tokens, $i, $actual_len);
+            $batch_out = array_slice($tokens, $i + 1, $actual_len);
+            // Maske beschreibt die Rolle des ZIEL-Tokens ($batch_out), nicht
+            // des Input-Tokens - genau das wird vorhergesagt und soll bei
+            // [USER]-Text nicht in den Loss/Gradienten einfliessen.
+            $batch_mask = array_slice($role, $i + 1, $actual_len);
+
+            // AUDIT-FIX 2026-08-18 (Engine-Audit Befund 8 + 7):
+            // Ein Fenster, dessen Ziel-Tokens KOMPLETT maskiert sind (reiner
+            // [USER]-Text), liefert per Definition keinen Gradienten:
+            // cortex_train_step() setzt alle d_logits auf 0, die globale Norm
+            // wird 0, adamStep() ueberspringt jeden Parameter wegen scale == 0.
+            // Das Fenster kostete also einen vollen Forward+Backward-Pass fuer
+            // exakt nichts - UND es gab 0.0 als Loss zurueck, was hier
+            // ungeprueft in $loss_sum landete waehrend $steps hochzaehlte: der
+            // geloggte "Avg Loss" wurde dadurch nach unten verwaessert, ein
+            // Messfehler, der wie eine Verbesserung aussieht. Vorab
+            // ueberspringen ist trainingsmathematisch exakt aequivalent (kein
+            // Gewicht aendert sich in so einem Schritt), spart den Pass und
+            // haelt zusaetzlich den Adam-Schrittzaehler ehrlich.
+            $has_trainable = false;
+            foreach ($batch_mask as $m) {
+                if ($m) { $has_trainable = true; break; }
+            }
+            if (!$has_trainable) continue;
+
+            $global_step++;
+            $current_lr = $initial_lr;
+            if ($warmup_steps > 0 || $lr_decay_steps > 0) {
+                if ($warmup_t0 === null) {
+                    $warmup_t0 = (int)$cortex->get_adam_t();
+                    if ($warmup_steps > 0) echo "  > [Warmup] $warmup_steps Schritte, Start bei adam_t=$warmup_t0, Ziel-LR $initial_lr\n";
+                    if ($lr_decay_steps > 0) echo "  > [LR-Decay] Cosinus bis adam_t=$lr_decay_steps, Boden " . sprintf('%.7f', $initial_lr * $lr_min_ratio) . "\n";
+                }
+                $warmup_n++;
+                $warmup_t = $warmup_t0 + $warmup_n;
+                if ($warmup_t < $warmup_steps) {
+                    $current_lr = $initial_lr * $warmup_t / $warmup_steps;
+                } elseif ($lr_decay_steps > $warmup_steps) {
+                    $lr_progress = min(1.0, ($warmup_t - $warmup_steps) / ($lr_decay_steps - $warmup_steps));
+                    $current_lr = $initial_lr * ($lr_min_ratio + (1.0 - $lr_min_ratio) * 0.5 * (1.0 + cos(M_PI * $lr_progress)));
+                }
+                if ($warmup_steps > 0 && ($warmup_n === 1 || $warmup_t === $warmup_steps)) {
+                    echo "  > [Warmup] adam_t=$warmup_t LR=" . sprintf('%.7f', $current_lr) . "\n";
+                }
+                if ($lr_decay_steps > 0 && ($warmup_n === 1 || $warmup_t === $lr_decay_steps)) {
+                    echo "  > [LR-Decay] adam_t=$warmup_t LR=" . sprintf('%.7f', $current_lr) . "\n";
+                }
+            }
+
+            // Bounds Check
+            $max_id = max($batch_in);
+            $min_id = min($batch_in);
+            if ($min_id < 0 || $max_id >= $vocab_limit) {
+                echo "🚨 [Worker Debug] ILLEGALE TOKENS! Min: $min_id, Max: $max_id (Limit: $vocab_limit)\n";
+                exit(1);
+            }
+
+            if ($adamc_ref !== null) {
+                $adamc_wd = $weight_decay * $current_lr / $adamc_ref;
+                if ($adamc_wd !== $adamc_wd_gesetzt) {
+                    $cortex->set_weight_decay($adamc_wd);
+                    if ($adamc_wd_gesetzt === null) {
+                        echo "  > [AdamC] erster Schritt: LR " . sprintf('%.7g', $current_lr) . ", Weight Decay im Kern " . sprintf('%.7g', $cortex->get_weight_decay()) . "\n";
+                    }
+                    $adamc_wd_gesetzt = $adamc_wd;
+                }
+            }
+
+            // Inferenz / Training in der C-Engine
+            if (method_exists($cortex, 'train_step')) {
+                $loss = $cortex->train_step($batch_in, $batch_out, $batch_mask, $current_lr);
+                if ($loss === null) $loss = 0.001;
+            } else {
+                echo "⚠️ [Worker " . getmypid() . "] train_step() fehlt! Simuliere...\n";
+                $loss = max(0.001, 0.99 * (1.0 / (($global_step * 0.01) + 1)));
+            }
+
+            // AUDIT-FIX: Off-by-one Logging Bug behoben
+            if (is_nan($loss) || is_infinite($loss)) {
+                $err_step = $steps + 1;
+                echo "🚨 [Fatal] Worker " . getmypid() . " | Exploding Gradients (NaN) bei Step $err_step! Breche ab.\n";
+                exit(1);
+            }
+
+            $loss_sum += $loss;
+            $steps++;
+            $recent_losses[] = $loss;
+
+            if ($steps <= 5 || $steps % 5 === 0) {
+                // Update 2026-08-09 (Nachruest-Paket #9
+                // "Gradient-Norm-Logging"): GradNorm haengt an dieselbe Zeile wie
+                // Avg Loss an - die bestehende "Avg Loss:"-Regex in
+                // train_cluster.php bleibt dadurch unveraendert gueltig, ein
+                // neuer Regex greift zusaetzlich das Feld danach ab.
+                // AUDIT-FIX (2026-08-09): number_format() ohne
+                // explizite Trenner-Argumente setzt ab 1000 ein Tausender-Komma
+                // (z.B. "1,042.7545") - der Parse-Regex in train_cluster.php
+                // ([0-9.]+) brach dort ab und lieferte nur "1" statt des echten
+                // Werts. GradNorm liegt in der Praxis oft > 1000. Explizit ohne
+                // Trenner formatieren, wie $active_lr in train_cluster.php.
+                $grad_norm_str = method_exists($cortex, 'get_last_grad_norm')
+                    ? number_format($cortex->get_last_grad_norm(), 4, '.', '')
+                    : 'n/a';
+                echo "Worker " . str_pad((string)getmypid(), 5, " ", STR_PAD_LEFT) . " | Epoch $global_epoch | Step " . str_pad((string)$steps, 3, " ", STR_PAD_LEFT) . " | Avg Loss: " . number_format($loss_sum / $steps, 6) . " | GradNorm: $grad_norm_str\n";
+            }
+
+            // GC explizit entlasten
+            unset($batch_in, $batch_out);
+        }
+
+        // Update 2026-08-09: Loss der letzten
+        // RECENT_LOSS_WINDOW Schritte statt des Epochendurchschnitts -
+        // $loss_sum/$steps (siehe "Avg Loss" oben) ist ueber die GANZE Epoche
+        // gemittelt, verwaesert also von den anfangs noch schlechteren
+        // Schritten. Fuer einen direkten Vergleich mit dem Held-out-Loss
+        // (der immer den FERTIGEN Epochenstand misst) ist dieser Wert die
+        // passendere Grundlage. Eigene KEY=VALUE-Zeile (Muster wie
+        // GPU_BACKEND= oben), garantiert am tatsaechlichen Ende der
+        // Mini-Batch-Schleife berechnet - unabhaengig davon, ob der letzte
+        // Schritt zufaellig auf eine "Step % 5 === 0"-Log-Zeile fiel.
+        if (count($recent_losses) > 0) {
+            $recent_window = array_slice($recent_losses, -RECENT_LOSS_WINDOW);
+            $recent_avg = array_sum($recent_window) / count($recent_window);
+            echo "RECENT_LOSS=" . number_format($recent_avg, 6, '.', '') . " RECENT_LOSS_N=" . count($recent_window) . "\n";
+        }
+        unset($tokens, $offsets, $recent_losses);
+    }
+}
+if ($adamc_ref !== null && $adamc_wd_gesetzt !== null) {
+    echo "  > [AdamC] letzter Schritt: LR " . sprintf('%.7g', $current_lr) . ", Weight Decay im Kern " . sprintf('%.7g', $cortex->get_weight_decay()) . "\n";
+}
+
+// AUDIT-FIX: Ohne einen einzigen Schritt waere das Ergebnis eine unveraenderte
+// Kopie des Basismodells - die Pipeline hat solche Klone bisher als vollwertige
+// Experten verbucht (Loss-Platzhalter 999). Lieber laut scheitern.
+if ($global_step === 0) {
+    echo "🚨 [Fatal] Worker " . getmypid() . ": kein einziger Trainingsschritt ausgefuehrt.\n";
+    echo "  > Der Chunk enthaelt zu wenige Tokens (mindestens 2 noetig).\n";
+    exit(1);
+}
+
+echo "  > [Worker " . getmypid() . "] Training abgeschlossen. Extrahiere aktualisierte Gewichte...\n";
+
+// Hier passiert der große RAM-Spike (Die OOM-Illusion), ist aber für E>H aktuell akzeptabel
+if (method_exists($cortex, 'extract_state')) {
+    $state_array = $cortex->extract_state();
+    if ($state_array === false || $state_array === null) {
+        worker_abbruch("🚨 [Worker " . getmypid() . "] FATAL: extract_state() lieferte ungültiges Ergebnis!\n");
+    }
+} else {
+    worker_abbruch("🚨 [Worker " . getmypid() . "] FATAL: Konnte Gewichte nicht aus C-RAM extrahieren (Methode fehlt)!\n");
+}
+
+if (!function_exists('save_model_stream')) {
+    worker_abbruch("🚨 Fatal: 'save_model_stream' nicht in tensor_io.php gefunden!\n");
+}
+
+try {
+    save_model_stream($state_array, $output_file);
+    // Head-Zahl fuer den NAECHSTEN Ladevorgang festschreiben, damit sie nie
+    // wieder aus $model_dim neu geraten werden kann/muss.
+    write_num_heads($output_file, $num_heads);
+    echo "  > ✅ [Erfolg] Arbeiter-Gewichte via Stream gesichert unter $output_file\n";
+} catch (Exception $e) {
+    worker_abbruch("🚨 Fatal: Fehlschlag beim Speichern des Modells: " . $e->getMessage() . "\n");
+}
+
+exit(0);

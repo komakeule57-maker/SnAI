@@ -1,0 +1,6 @@
+{
+    "enabled": false,
+    "tensors": "w_up,w_q,w_k,w_v,w_o,w_down",
+    "scale": 0.02,
+    "cooldown": 3
+}

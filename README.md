@@ -1,0 +1,215 @@
+***Deutsch** · [English](README.en.md)*
+
+# Symbiotic Nano-AI
+
+Proof of Concept: Dieses Framework ist der lebende Beweis, dass man nicht auf Python angewiesen ist, um eine schnelle, hardwareagnostische KI-Architektur zu bauen. Es entkoppelt das neuronale Training komplett von gängigen pip-Abhängigkeiten und Virtual Environments.
+
+Ein dezentrales, ressourceneffizientes Framework für das Training, die Synthese und die Inferenz von Large Language Models (LLMs) auf Consumer-Hardware.
+
+Das System kombiniert die Flexibilität von PHP mit der nackten Performance einer C/Nim-Engine via Zero-Copy FFI (Foreign Function Interface). Es ermöglicht verteiltes Lernen (Federated Averaging) über P2P-Netzwerke und dynamisches Modell-Wachstum durch Network Morphism (Net2Net).
+
+## 🚀 Kern-Features
+
+**P2P Schwarm-Training (Federated Averaging):** Verteiltes Lernen auf mehreren PCs. Das System synchronisiert Trainingsdaten und verschmilzt lokal trainierte Gewichte vollautomatisch über das lokale Netzwerk. Kommunikation läuft direkt über UDP/TCP (Gossip-Protokoll), ohne zentralen Server und ohne Cloud-Abhängigkeit.
+
+> Hinweis: Dies ist echtes Full-Parameter-Training. Es handelt sich **nicht** um LoRA, DoRA oder andere PEFT-Adapter, sondern um das Verschmelzen vollständiger, dichter Matrizen.
+
+**Network Morphism (Destille):** Verlustfreies Upscaling von Basismodellen (128 Dimensionen) auf höhere Architekturen (256, 512, 1024 und darüber), inklusive Mitskalierung des Adam-Zustands.
+
+**Autonome Steuerung:** Ein Daemon überwacht Rohdaten, trainiert automatisiert Basis-Drohnen und verschmilzt diese bei kritischer Masse zu größeren Netzen.
+
+**Zero-Copy Inferenz:** Direkte Speicheradressierung der Tensoren in RAM/VRAM unter Umgehung des PHP-Overheads. Die Gewichte werden nie durch PHP-Arrays gereicht.
+
+**Drei Rechenpfade:** CUDA, OpenCL und CPU. Das Backend wird zur Laufzeit ermittelt (`cortex_init_gpu()`); die GPU greift ab 512 Dimensionen, kleinere Modelle rechnen bewusst auf der CPU.
+
+## 🛠 Systemanforderungen
+
+- **OS:** Linux (Ubuntu/Debian/Arch/Manjaro)
+- **PHP:** 8.1 oder höher (CLI-Modus). **Wichtig:** In der `php.ini` muss `ffi.enable=true` gesetzt sein.
+- **Nim Compiler:** 1.6+ (baut die Engine)
+- **C-Compiler mit OpenMP:** Die Engine wird mit `--threads:on` und `-fopenmp` übersetzt. Ohne OpenMP läuft sie, aber jede parallele Schleife seriell.
+- **OpenCL (optional):** für GPU-beschleunigte Inferenz und Training
+- **CUDA (optional):** wird eingebunden, wenn `nvcc` beim Bauen gefunden wird; sonst überspringt `./symbio.sh init` das CUDA-Backend und OpenCL/CPU tragen allein.
+
+## 📦 Installation
+
+```bash
+git clone https://github.com/komakeule57-maker/SnAI.git
+cd SnAI
+chmod +x symbio.sh
+./symbio.sh init
+```
+
+`./symbio.sh init` ist **nicht optional** — die kompilierten Bibliotheken liegen bewusst nicht im Repository. Der Befehl legt die Ordnerstruktur an (`lib/`, `factory/…`) und baut:
+
+| Artefakt | Quelle | Bedingung |
+|---|---|---|
+| `lib/libcortex.so` | `core/cortex.nim` | immer |
+| `lib/libtensorutils.so` | `core/snai_tensor_utils.nim` | immer |
+| `lib/libcortex_cuda.so` | `core/cortex_cuda.cu` | nur wenn `nvcc` vorhanden |
+
+Nach dem Linken prüft das Skript zwei Dinge selbst, statt sie zu glauben: dass der RUNPATH exakt `$ORIGIN` lautet (sonst findet `libcortex.so` die CUDA-Bibliothek nicht und fällt **still** auf OpenCL zurück) und dass alle Pflichtsymbole exportiert sind. Schlägt eine der Prüfungen fehl, bricht der Build ab.
+
+## ⚙️ Nutzung
+
+Das Framework kann auf zwei Arten betrieben werden: vollautonom im Schwarm-Modus oder manuell über das CLI.
+
+### Modus 1: Vollautonomer Schwarm (empfohlen)
+
+Startet den P2P-Gossip-Node und den Autonomie-Daemon nebeneinander; Strg-C fährt beide ab.
+
+```bash
+./symbio.sh swarm
+```
+
+Ablauf:
+
+1. Rohe Textdateien nach `factory/input/` legen (siehe [Korpusformat](#-korpusformat)).
+2. Der Daemon erkennt die Daten, trainiert eine Basis-Drohne (128 Dim) und legt sie in `factory/experts/` ab. Der verbrauchte Text wandert nach `factory/archive/`.
+3. Sobald 3 Drohnen existieren, stellt der Daemon sie nach `factory/tributes/`, verschmilzt sie, skaliert auf 256 Dim und kalibriert nach — das Ergebnis landet als Prinzessin in `factory/royal/`.
+
+Der Node belegt dabei drei Ports: **UDP 43720** (Pheromone), **TCP 43721** (Tensor-Transfer) und **TCP 4372** (Hive-Fingerprint).
+
+### Modus 2: Manuelle Kontrolle (CLI)
+
+**Modell trainieren (BPTT)**
+
+```bash
+./symbio.sh cli train <input_text.txt> <output_modell.snai> [epochen]
+./symbio.sh cli train factory/input/data.txt factory/experts/drone.snai 20
+```
+
+Die Genesis-Dimension liegt fest bei 128 (Drohne); ein Dimensions-Argument gibt es nicht. Höhere Stufen entstehen durch Destillation, nicht durch direktes Training.
+
+**Lange Läufe: Warmup und Abklingen über Schritte**
+
+Warmup und Cosinus-Abklingen von `train_cluster.php` zählen in Epochen. Wer einen großen Korpus in Segmenten trainiert (jedes Segment ein Aufruf mit einer Epoche), bekommt dort weder das eine noch das andere, sondern durchgehend die volle Lernrate. Dafür gibt es drei Umgebungsvariablen, die über den Adam-Schrittzähler `adam_t` im Checkpoint zählen und deshalb über Segmentgrenzen hinweg fortlaufen:
+
+| Variable | Wirkung |
+|---|---|
+| `SNAI_WARMUP_STEPS=N` | Lernrate steigt linear über die ersten N Schritte |
+| `SNAI_LR_DECAY_STEPS=M` | Cosinus vom Warmup-Ende bis Schritt M, danach Boden |
+| `SNAI_LR_MIN_RATIO=r` | Boden = r × Lernrate (Vorgabe 0,1) |
+
+Ohne diese Variablen bleibt alles wie bisher. Ein Rezept, das an einem Modell mit Breite 512, 6 Schichten und Kontext 1024 erprobt ist (nicht an der 128er-Drohne): Lernrate `0.0001`, `SNAI_WARMUP_STEPS=500`, `SNAI_LR_DECAY_STEPS` = Schritte des ganzen Laufs, Weight Decay `0.1` (10. Argument von `train_cluster.php`), ein Worker, kein Dropout, kein Label-Smoothing. Mit Lernrate 0,001 ohne Warmup sättigte dort die Attention binnen weniger hundert Schritte; ein Langlauf mit dieser Einstellung lernte über 20 Segmente nie, aus dem Kontext zu kopieren.
+
+**Weight Decay, der mit der Lernrate fällt (AdamC)**
+
+Der Weight Decay wird als `w -= lr × wd × w` angewendet. Bleibt `wd` fest, während die Lernrate abklingt, zieht er die Gewichte im Verhältnis zum Gradienten immer stärker zusammen. Die Gewichte vor den RMSNorms schrumpfen, und die Gradientennorm steigt (Defazio 2025, arXiv:2506.02285). Mit `SNAI_WD_LR_REF` fällt der Decay mit der Lernrate, `wd_t = wd × lr_t / lr_max`, und folgt dabei auch Warmup und Cosinus der Schritt-Variablen oben:
+
+| Variable | Wirkung |
+|---|---|
+| `SNAI_WD_LR_REF=<lr_max>` | Spitzen-Lernrate des ganzen Plans, z. B. bei Segmentketten mit eigener Lernrate je Segment |
+| `SNAI_WD_LR_REF=auto` | Spitze = 7. Argument von `train_cluster.php`. Passt zum Epochen-Plan von `train_cluster.php` und, in Segmentläufen, zum Schritt-Plan oben |
+
+Ohne die Variable oder bei Weight Decay 0 bleibt alles wie bisher. Liegt die Lernrate über der Referenz, bricht der Worker ab. Gemessen ist das an Modellen mit Breite 128 und 4 Schichten, im 8-Bit-Pfad und in einem float32-Nachbau, mit 11 Läufen: Mit der Lernrate auf einem Viertel und dem Weight Decay ebenso (0,025 statt 0,1) wurde der Held-out-Loss in allen Läufen um rund 0,036 nats besser. Über einen ganzen Abkühlplan ist das noch nicht gemessen.
+
+**Modell befragen (Zero-Copy Inferenz)**
+
+```bash
+./symbio.sh cli infer <modell.snai> "<prompt>" [beam_width]
+./symbio.sh cli infer factory/experts/drone.snai "Die Bahnstrecke"
+```
+
+Ohne `beam_width` läuft Temperature/min-p-Sampling; ab `2` schaltet Beam-Search ein. Der Prompt wird intern als `[USER] <text>\n[SYMBIO]` formatiert.
+
+**Modell destillieren (Merge + Net2Net Upscale + Kalibrierung)**
+
+```bash
+./symbio.sh cli distill [Prinzessin|Matriarchin|Empress|Demi Goddess|Goddess]
+./symbio.sh cli distill Prinzessin
+```
+
+Verschmelzung, Expansion und Kalibrierung laufen als **eine** Einheit — die früheren Einzelschritte `cli merge` und `cli upscale` gibt es nicht mehr. Für `Prinzessin` müssen 3 Drohnen in `factory/tributes/` liegen; im autonomen Betrieb stellt der Daemon sie selbst dorthin.
+
+## 🧬 Evolutionsleiter
+
+Jede Stufe entsteht aus der vorigen. Die Werte stehen in `EVOLUTION_LADDER` in `src/royal_distillery.php`; die Layer-Zahlen bis Empress folgen dem Verhältnis von Pythia-70M (512 Dim / 6 Layer), nicht einem konstanten Dim/Layer-Faktor.
+
+| Stufe | Dim | Kontext | Layer | Quelle | Ablage |
+|---|---|---|---|---|---|
+| Drohne | 128 | 512 | 2 | Genesis | `factory/experts/` |
+| Prinzessin | 256 | 1024 | 3 | 3 Drohnen | `factory/royal/` |
+| Matriarchin | 512 | 2048 | 6 | Prinzessin | `factory/apex/` |
+| Empress | 1024 | 4096 | 12 | Matriarchin | `factory/apex/` |
+| Demi Goddess | 2048 | 8192 | 16 | Empress | `factory/apex/` |
+| Goddess | 4096 | 8192 | 32 | Demi Goddess | `factory/apex/` |
+
+## 📝 Korpusformat
+
+Reiner Fliesstext funktioniert unverändert — solche Dokumente trainieren vollständig.
+
+Für Dialogdaten sind `[USER]`, `[SYMBIO]` und `[SYSTEM]` registrierte Einzel-Tokens:
+
+```
+[USER] Definiere eine Python Funktion:
+[SYMBIO] def hallo():
+print('Test')</s>
+```
+
+Enthält ein Dokument diese Marker, greift **Loss-Masking**: nur die `[SYMBIO]`-Antwort liefert Gradienten, der `[USER]`-Text nicht. Fehlen die Marker in einem eigenen Vokabular als Einzel-Tokens, schaltet der Worker das Masking mit einer Warnung ab, statt zu raten.
+
+**Vokabular.** `lib/symbio_vocab.json` umfasst 8192 Token (BPE mit Metaspace `U+2581`), gebaut aus einem bereinigten deutschen Korpus. Zeichen, die nicht im Grundalphabet stehen, gehen als UTF-8-Bytes durch (256 Byte-Token, `byte_fallback`). Es entsteht also kein `<unk>` mehr, auch nicht bei Emoji oder fremden Schriften. Ein eigenes Vokabular baut
+
+```bash
+tools/bpe_init/bpe_forge <korpus_ordner> lib/symbio_vocab.json
+```
+
+aus allen `*.txt`/`*.php` des Ordners. `src/korpus_sanitize.php` (`korpus_bereinigen()`) streicht vor dem Training Läufe in nicht transliterierbaren Schriften samt Sprachangabe, z. B. „(chinesisch 新镇)“.
+
+> ⚠️ **Seit Oktober 2026 gilt ein neues Vokabular.** Modelle, die mit dem alten (bis Oktober 2026) trainiert wurden, passen nicht dazu: dieselbe Token-Nummer steht jetzt für ein anderes Stück Text. Alte Modelle neu trainieren. Das alte `lib/symbio_vocab.json` liegt nicht mehr im Repo und ist auf Nachfrage erhältlich.
+
+## 💾 Modellformat (SNAI_V5)
+
+Ein Checkpoint ist ein roher Strom, kein Container:
+
+- **28-Byte-Header:** 8 Byte gepaddetes Magic `SNAI_V5`, dann 5× `uint32` Little-Endian — `vocab`, `hidden`, `ffn`, `ctx`, `layers`
+- **Nutzlast:** `float32` Little-Endian. Pro Tensor werden Gewicht und die beiden Adam-Momente **verschränkt** abgelegt (`w`, `m`, `v`) — daher die dreifache Dateigrösse gegenüber reinen Gewichten.
+- **Trailer:** optionaler `int32` `adam_t` (Schrittzähler)
+- **Sidecars:** `<modell>.heads` (Attention-Köpfe) und `<modell>.growth` (Net2Net-Expansionsgrenze). Beide gehören zum Modell und müssen mitkopiert werden.
+
+> ⚠️ **Modelle im alten Format `SNAI_V4` können nicht gelesen werden.** V4 enthielt nur Gewichte ohne Adam-Zustand, und das Vokabular hat sich von 16384 auf 8192 Token geändert — die Embedding-Matrizen wären selbst nach einer Formatkonvertierung bedeutungslos. Einen Konverter gibt es nicht. Der Juni-Stand liegt nicht mehr im Repo und ist auf Nachfrage erhältlich.
+
+## 📂 Architektur / Verzeichnisstruktur
+
+| Pfad | Inhalt |
+|---|---|
+| `core/` | Quelltext der Nim/C/CUDA-Tensor-Engine |
+| `src/` | PHP-Steuerlogik (Daemon, Node, Cluster-Master, Destille, CLI) |
+| `lib/` | Tokenizer-Vokabular; hierhin baut `symbio.sh init` die `.so`-Dateien |
+| `tools/` | Tokenizer-Schmiede (`bpe_forge.nim`, nur Nim-Standardbibliothek) zur einmaligen Vokabular-Erzeugung |
+| `factory/` | Laufzeit-Territorium, wird beim `init` angelegt |
+| `docs/` | Berichte und Studien des Hauptzweigs (siehe unten) |
+
+Innerhalb von `factory/`:
+
+| Pfad | Inhalt |
+|---|---|
+| `input/` | rohe Textdaten (`.txt`) für das Training |
+| `archive/` | verbrauchte Textdaten, werden für Kalibrierungen wiederverwendet |
+| `experts/` | Basis-Drohnen (128 Dim) |
+| `tributes/` | Vorraum der Destille: die 3 Drohnen der nächsten Synthese |
+| `royal/` | Prinzessinnen (256 Dim) |
+| `apex/` | Matriarchin und höher |
+| `royal_fragments/` | verbrauchte Drohnen nach einer erfolgreichen Synthese |
+| `checkpoints/` | Zwischenstände je Epoche und Worker |
+
+## 📚 Dokumentation
+
+Der Ordner `docs/` enthält Berichte und Studien des fp32-Hauptzweigs, aus dem diese Distro stammt. Sie ist auf Deutsch:
+
+- [`docs/BUGFIXES.md`](docs/BUGFIXES.md) – behobene Fehler mit Ursache
+- [`docs/STUDIE_WEIGHT_TYING.md`](docs/STUDIE_WEIGHT_TYING.md), [`docs/inferenz/`](docs/inferenz/) – Studien und Inferenzberichte der Evolutionsstufen
+- [`docs/INT8_FORK_ERGEBNISSE.md`](docs/INT8_FORK_ERGEBNISSE.md) – Auswertung der Chinchilla-Prinzessin im int8-Fork (2026-08-27)
+- [`docs/demi_goddess_testrun.md`](docs/demi_goddess_testrun.md) – Planung eines Machbarkeitstests der Stufe Demi Goddess auf einer RTX 3050 (6 GB)
+
+Die Doku beschreibt den Hauptzweig. Pfade wie `snai_edge/…` oder einzelne Skripte, die dort liegen, gibt es in der Distro nicht immer; Rechnernamen sind neutralisiert.
+
+**Forschung zu int8-Training:** Die Weiterentwicklung mit int8-Gewichten, Ganzzahl-Rückwärtsrechnung und 8-Bit-Adam liegt bewusst nicht in dieser Distro, sondern im eigenen Repo [komakeule57-maker/snai-int8](https://github.com/komakeule57-maker/snai-int8), mit der vollständigen Forschungsakte (413 Messreihen).
+
+## ⚖️ Lizenz & Kommerzielle Nutzung
+
+Dieses Projekt ist Open Source und unter der GNU AGPLv3 lizenziert. Das bedeutet, dass du den Code für private, akademische oder Open-Source-Projekte frei nutzen, verändern und weitergeben darfst, solange du dich an die Bedingungen der AGPLv3 hältst (welche vorschreibt, dass abgeleitete Werke ebenfalls unter dieser Lizenz veröffentlicht werden müssen).
+
+**Für Unternehmen:**
+Wenn ihr diesen Code in einem kommerziellen oder proprietären Umfeld (inklusive SaaS) nutzen, integrieren oder verbreiten möchtet, ohne den strengen Open-Source-Zwang der AGPLv3 zu übernehmen, ist eine separate kommerzielle Lizenz erforderlich. Bitte kontaktiert mich für kommerzielle Anfragen.
